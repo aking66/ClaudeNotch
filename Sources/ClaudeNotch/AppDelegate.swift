@@ -6,6 +6,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel?
     private var watcher: ClaudeWatcher?
+    private var hookServer: HookServer?
     private var statusItem: NSStatusItem?
     private var toggleMenuItem: NSMenuItem?
     private var launchAtLoginMenuItem: NSMenuItem?
@@ -24,6 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.panel = panel
 
         watcher.start()
+
+        // Bring up the hook server BEFORE we start touching settings.json,
+        // so the socket is ready whenever Claude Code first fires a hook.
+        let server = HookServer { event in
+            NSLog("ClaudeNotch hook: \(event.hookEventName) session=\(event.sessionId ?? "?") tool=\(event.toolName ?? "-")")
+        }
+        server.start()
+        self.hookServer = server
 
         setupStatusItem()
     }
