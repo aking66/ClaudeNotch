@@ -1,0 +1,15 @@
+# Swift build artifacts
+.build/
+.swiftpm/
+Package.resolved
+
+# Built app bundle
+*.app
+
+# macOS
+.DS_Store
+
+# Xcode (in case added later)
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
