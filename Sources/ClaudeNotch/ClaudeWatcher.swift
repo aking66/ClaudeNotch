@@ -80,11 +80,22 @@ final class ClaudeWatcher: ObservableObject {
     /// overrides so UI updates can arrive without re-scanning disk.
     private var baseSessions: [URL: ClaudeSession] = [:]
 
-    /// Session-status overrides driven by Claude Code hook events,
-    /// keyed by session UUID (matches ClaudeSession.sessionID). Hook
-    /// events take precedence over jsonl-derived status because they
-    /// land within milliseconds of the real state change.
-    private var hookStatus: [String: SessionStatus] = [:]
+    /// Session-status overrides driven by Claude Code hook events.
+    /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
+    /// override carries the timestamp it was written so it can expire.
+    ///
+    /// Why the expiry matters: if a session fired `PermissionRequest`
+    /// (setting status → awaitingApproval) and then the user approved
+    /// in a terminal window where our hooks aren't installed (e.g. a
+    /// session that started before HookInstaller ran), no clearing
+    /// event ever arrives and the UI gets stuck. With expiry, we fall
+    /// back to the parseTail-derived status after the timeout.
+    private var hookStatus: [String: (status: SessionStatus, at: Date)] = [:]
+
+    /// How long a hook-driven status remains authoritative. Long enough
+    /// to cover the typical gap between a PermissionRequest and the
+    /// matching PostToolUse, short enough to recover from lost events.
+    private let hookStatusTTL: TimeInterval = 90
 
     /// If a tool_use is the last assistant entry AND the file has been idle
     /// for longer than this, the session is considered to be waiting for the
@@ -214,16 +225,16 @@ final class ClaudeWatcher: ObservableObject {
               let newStatus = Self.statusFromHookEvent(event.hookEventName)
         else { return }
 
-        let previous = hookStatus[sid]
-        hookStatus[sid] = newStatus
+        let previousStatus = hookStatus[sid]?.status
+        hookStatus[sid] = (newStatus, Date())
 
         // Fire user notifications on the meaningful transitions.
-        if previous != newStatus {
+        if previousStatus != newStatus {
             let projectName = baseSessions.values
                 .first(where: { $0.sessionID == sid })?.projectName
                 ?? sid
             handleTransition(
-                from: previous ?? .idle,
+                from: previousStatus ?? .idle,
                 to: newStatus,
                 projectName: projectName
             )
@@ -239,29 +250,36 @@ final class ClaudeWatcher: ObservableObject {
         case "UserPromptSubmit", "PreToolUse":
             return .working
         case "PostToolUse":
-            // Claude is still mid-turn between tool calls; a Stop will
-            // arrive when it truly finishes.
+            // Tool finished (whether auto-approved or user-approved) — the
+            // session is no longer blocked on a permission prompt. Claude
+            // is still mid-turn; a Stop will arrive when it truly finishes.
             return .working
         case "PermissionRequest":
+            // The authoritative signal for "stuck waiting on the user".
             return .awaitingApproval
-        case "Notification":
-            // Claude Code uses Notification for "needs your attention",
-            // which in practice means awaiting approval or input.
-            return .awaitingApproval
-        case "Stop":
-            return .idle
-        case "SessionEnd":
+        case "Stop", "SessionEnd":
             return .idle
         default:
+            // Notification and other events are deliberately ignored: they
+            // can fire for idle timeouts, session ends, generic attention
+            // requests, etc. and would cause false "awaiting approval"
+            // states. PermissionRequest is the only reliable approval
+            // signal; we rely on it alone.
             return nil
         }
     }
 
     /// Merge `baseSessions` with `hookStatus` overrides and publish.
+    /// Hook overrides older than `hookStatusTTL` are ignored — we fall
+    /// back to the jsonl-derived status so a stuck awaitingApproval
+    /// (e.g. from a session that predated the hook installer) can
+    /// recover on its own once the file changes again.
     private func rebuildPublishedSessions() {
+        let now = Date()
         let merged = baseSessions.values.map { session -> ClaudeSession in
-            if let hook = hookStatus[session.sessionID] {
-                return session.with(status: hook)
+            if let hook = hookStatus[session.sessionID],
+               now.timeIntervalSince(hook.at) < hookStatusTTL {
+                return session.with(status: hook.status)
             }
             return session
         }

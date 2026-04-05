@@ -51,6 +51,12 @@ struct NotchView: View {
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
                     isExpanded = hovering
                 }
+                // Opportunistically refresh the usage limits when the panel
+                // opens, so the numbers match Anthropic's live state while
+                // the user is actively looking at them.
+                if hovering {
+                    usage.refreshIfStale(maxAge: 20)
+                }
             }
         }
         .frame(

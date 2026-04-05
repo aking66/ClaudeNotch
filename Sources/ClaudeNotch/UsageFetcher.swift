@@ -35,9 +35,9 @@ final class UsageFetcher: ObservableObject {
     @Published private(set) var lastError: String?
 
     private var timer: Timer?
-    /// Anthropic refreshes these numbers slowly; 5 minutes is plenty
-    /// often for a notch indicator and easy on the server.
-    private let pollInterval: TimeInterval = 5 * 60
+    /// Background refresh cadence. Tight enough to stay within ~1% of
+    /// the live Anthropic counters.
+    private let pollInterval: TimeInterval = 2 * 60
     private var inFlight = false
 
     func start() {
@@ -54,6 +54,16 @@ final class UsageFetcher: ObservableObject {
 
     /// Manually trigger a fetch — used on app launch and by any UI retry.
     func refresh() {
+        Task { await fetch() }
+    }
+
+    /// Re-fetch only if the cached value is older than `maxAge` seconds.
+    /// Used by opportunistic triggers (hover expand, PostToolUse hook)
+    /// so the UI is always ~freshest possible without hammering the API.
+    func refreshIfStale(maxAge: TimeInterval) {
+        if let lastFetched, Date().timeIntervalSince(lastFetched) < maxAge {
+            return
+        }
         Task { await fetch() }
     }
 

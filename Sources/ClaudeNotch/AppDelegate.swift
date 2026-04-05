@@ -35,9 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so the socket is ready whenever Claude Code first fires a hook.
         // Events are routed straight into the watcher so the UI reflects
         // state changes with sub-100ms latency — no polling wait.
-        let server = HookServer { [weak watcher] event in
+        // PostToolUse / Stop also poke the usage fetcher because every
+        // finished turn nudges the 5h / 7d counters on Anthropic's side.
+        let server = HookServer { [weak watcher, weak usage] event in
             NSLog("ClaudeNotch hook: \(event.hookEventName) session=\(event.sessionId ?? "?") tool=\(event.toolName ?? "-")")
             watcher?.applyHookEvent(event)
+
+            if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
+                usage?.refreshIfStale(maxAge: 30)
+            }
         }
         server.start()
         self.hookServer = server
