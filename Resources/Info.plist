@@ -26,5 +26,7 @@
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>ClaudeNotch focuses the Terminal tab running the Claude session you clicked.</string>
 </dict>
 </plist>

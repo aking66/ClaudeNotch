@@ -5,6 +5,9 @@ struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
     let projectName: String
     let lastModified: Date
+    let lastSnippet: String?   // Last assistant text, cleaned + truncated
+    let isWorking: Bool        // True if Claude is currently processing
+    let cwd: String?           // Authoritative working dir from the jsonl entries
 }
 
 /// Polls ~/.claude/projects/ every few seconds and publishes active sessions.
@@ -59,10 +62,14 @@ final class ClaudeWatcher: ObservableObject {
 
             let mod = Self.modDate(latest)
             if mod > cutoff {
+                let (snippet, working, cwd) = Self.parseTail(latest)
                 found.append(ClaudeSession(
                     id: latest,
                     projectName: Self.decodeProjectName(dir.lastPathComponent),
-                    lastModified: mod
+                    lastModified: mod,
+                    lastSnippet: snippet,
+                    isWorking: working,
+                    cwd: cwd
                 ))
             }
         }
@@ -72,6 +79,92 @@ final class ClaudeWatcher: ObservableObject {
 
     private static func modDate(_ url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    /// Read the tail of a .jsonl session file and derive:
+    ///   - lastSnippet: the most recent assistant text content (cleaned, truncated)
+    ///   - isWorking: whether Claude is mid-turn (last entry is user, or assistant's
+    ///     last content item is a tool_use awaiting a tool_result)
+    ///   - cwd: the working directory recorded in the most recent entry (authoritative)
+    /// Reads only the final ~16KB to stay cheap on large sessions.
+    private static func parseTail(_ url: URL) -> (snippet: String?, isWorking: Bool, cwd: String?) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return (nil, false, nil)
+        }
+        defer { try? handle.close() }
+
+        let chunkSize: UInt64 = 16_384
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        let start = fileSize > chunkSize ? fileSize - chunkSize : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.readToEnd()) ?? Data()
+
+        guard let text = String(data: data, encoding: .utf8) else {
+            return (nil, false, nil)
+        }
+
+        // Parse lines in reverse. The very first (last) line may be a partial write
+        // from Claude Code currently flushing, so tolerate parse failures.
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+
+        var lastParsed: [String: Any]? = nil
+        var snippet: String? = nil
+        var cwd: String? = nil
+
+        for line in lines.reversed() {
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+
+            if lastParsed == nil {
+                lastParsed = obj
+            }
+
+            // The cwd field is on every entry; grab it from the first successfully
+            // parsed (most recent) line.
+            if cwd == nil, let c = obj["cwd"] as? String, !c.isEmpty {
+                cwd = c
+            }
+
+            // Capture the most recent assistant text content for the snippet.
+            if snippet == nil,
+               (obj["type"] as? String) == "assistant",
+               let msg = obj["message"] as? [String: Any],
+               let contents = msg["content"] as? [[String: Any]] {
+                for c in contents {
+                    if (c["type"] as? String) == "text",
+                       let txt = c["text"] as? String {
+                        var cleaned = txt
+                            .replacingOccurrences(of: "\n", with: " ")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if cleaned.count > 120 {
+                            cleaned = String(cleaned.prefix(120))
+                        }
+                        if !cleaned.isEmpty { snippet = cleaned }
+                        break
+                    }
+                }
+            }
+
+            if lastParsed != nil && snippet != nil && cwd != nil { break }
+        }
+
+        // Working = last speaker is user (Claude hasn't replied yet),
+        // or assistant's final content item is a tool_use (tool still running).
+        var isWorking = false
+        if let entry = lastParsed, let type = entry["type"] as? String {
+            if type == "user" {
+                isWorking = true
+            } else if type == "assistant",
+                      let msg = entry["message"] as? [String: Any],
+                      let contents = msg["content"] as? [[String: Any]],
+                      let last = contents.last,
+                      (last["type"] as? String) == "tool_use" {
+                isWorking = true
+            }
+        }
+
+        return (snippet, isWorking, cwd)
     }
 
     /// Claude Code encodes project paths by replacing "/" with "-".

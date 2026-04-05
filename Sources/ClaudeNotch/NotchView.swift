@@ -4,6 +4,7 @@ import SwiftUI
 struct NotchView: View {
     @ObservedObject var watcher: ClaudeWatcher
     @State private var tick = 0
+    @State private var hoveredSessionID: ClaudeSession.ID?
 
     // Re-render clock so relative times update every second.
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -48,8 +49,8 @@ struct NotchView: View {
                 .foregroundColor(.white.opacity(0.4))
                 .padding(.top, 4)
         } else {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(watcher.sessions.prefix(4)) { session in
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(watcher.sessions.prefix(3)) { session in
                     sessionRow(session)
                 }
             }
@@ -57,18 +58,47 @@ struct NotchView: View {
     }
 
     private func sessionRow(_ session: ClaudeSession) -> some View {
-        HStack(spacing: 6) {
-            Text("▸")
-                .foregroundColor(.green)
-            Text(session.projectName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundColor(.white.opacity(0.9))
-            Spacer()
-            Text(relativeTime(session.lastModified))
-                .foregroundColor(.white.opacity(0.45))
+        let isHovered = hoveredSessionID == session.id
+        return Button {
+            SessionLauncher.open(session)
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(session.isWorking ? "●" : "○")
+                        .foregroundColor(session.isWorking ? .yellow : .green)
+                        .shadow(color: session.isWorking ? .yellow.opacity(0.6) : .green.opacity(0.5), radius: 2)
+                    Text(session.projectName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundColor(.white.opacity(0.9))
+                    Spacer()
+                    Text(relativeTime(session.lastModified))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+                .font(.system(size: 10, design: .monospaced))
+
+                if let snippet = session.lastSnippet, !snippet.isEmpty {
+                    Text(snippet)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.5))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.leading, 14)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.cyan.opacity(isHovered ? 0.12 : 0))
+            )
+            .contentShape(Rectangle())
         }
-        .font(.system(size: 10, design: .monospaced))
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredSessionID = hovering ? session.id : nil
+        }
     }
 
     private var background: some View {
