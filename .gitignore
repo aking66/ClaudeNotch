@@ -9,6 +9,12 @@ Package.resolved
 # macOS
 .DS_Store
 
+# Local Claude Code settings
+.claude/
+
+# Runtime logs
+*.log
+
 # Xcode (in case added later)
 *.xcodeproj/
 *.xcworkspace/
