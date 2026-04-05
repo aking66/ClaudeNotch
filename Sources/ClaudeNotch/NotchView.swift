@@ -9,6 +9,10 @@ struct NotchView: View {
     @State private var isExpanded = false
     @State private var hoveredSessionID: ClaudeSession.ID?
     @State private var showUsageLimits = false
+    @State private var showAllSessions = false
+
+    /// Rows visible before the user taps "Show all N sessions".
+    private let defaultRowLimit = 3
 
     // Re-render clock so relative times update every second.
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -71,10 +75,7 @@ struct NotchView: View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
                 ForEach(watcher.sessions.prefix(4)) { session in
-                    PixelAvatar(
-                        seed: session.id.lastPathComponent.hashValue,
-                        color: session.isWorking ? .blue : .green
-                    )
+                    PixelAvatar(isWorking: session.isWorking)
                 }
             }
             Spacer(minLength: 4)
@@ -92,7 +93,7 @@ struct NotchView: View {
     }
 
     private var expandedContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             if watcher.sessions.isEmpty {
                 Text("> no active sessions")
@@ -100,10 +101,16 @@ struct NotchView: View {
                     .foregroundColor(.white.opacity(0.4))
                     .padding(.top, 4)
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(watcher.sessions.prefix(3)) { session in
+                let visible = showAllSessions
+                    ? Array(watcher.sessions)
+                    : Array(watcher.sessions.prefix(defaultRowLimit))
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(visible) { session in
                         sessionRow(session)
                     }
+                }
+                if watcher.sessions.count > defaultRowLimit {
+                    showAllButton
                 }
             }
             Spacer(minLength: 0)
@@ -111,10 +118,27 @@ struct NotchView: View {
         .transition(.opacity)
     }
 
+    private var showAllButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showAllSessions.toggle()
+            }
+        } label: {
+            Text(showAllSessions
+                 ? "Show fewer"
+                 : "Show all \(watcher.sessions.count) sessions")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white.opacity(0.45))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 4)
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Header
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 10) {
             Button {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showUsageLimits.toggle()
@@ -130,37 +154,52 @@ struct NotchView: View {
             }
             .buttonStyle(.plain)
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            Text("[\(watcher.sessions.count) ACTIVE]")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundColor(.cyan.opacity(0.7))
+            // Volume / sound indicator (placeholder — reserved for future mute
+            // of "Working..." beeps or notifications).
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.55))
+
+            // Settings cog — opens the menu bar item's menu in future iterations.
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.55))
         }
     }
 
-    // Placeholder usage-limit display. Real 5h / 7d figures require
-    // Anthropic API response headers that Claude Code does not persist
-    // locally; wire this up once we find a data source.
+    // Usage limit chip styled after the reference screenshot:
+    // [⚡ 5h 37% 3h41m | 7d 23% 5d]
+    // Real 5h / 7d figures require Anthropic rate-limit headers that Claude
+    // Code does not currently persist locally, so the percentages are shown
+    // as placeholders ("—%") until we wire up a data source.
     private var usageLimitView: some View {
         HStack(spacing: 6) {
-            Text("◆")
+            // Orange burst glyph, matches the reference aesthetic.
+            Image(systemName: "sparkle")
+                .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.orange)
+
             Text("5h")
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(.white)
             Text("—%")
                 .foregroundColor(.green)
             Text("—")
-                .foregroundColor(.white.opacity(0.45))
+                .foregroundColor(.white.opacity(0.4))
+
             Text("|")
-                .foregroundColor(.white.opacity(0.25))
+                .foregroundColor(.white.opacity(0.2))
+                .padding(.horizontal, 2)
+
             Text("7d")
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(.white)
             Text("—%")
                 .foregroundColor(.green)
             Text("—")
-                .foregroundColor(.white.opacity(0.45))
+                .foregroundColor(.white.opacity(0.4))
         }
-        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
     }
 
     // MARK: - Session row
@@ -171,20 +210,23 @@ struct NotchView: View {
             SessionLauncher.open(session)
         } label: {
             HStack(alignment: .top, spacing: 10) {
-                PixelAvatar(
-                    seed: session.id.lastPathComponent.hashValue,
-                    color: session.isWorking ? .blue : .green
-                )
-                .padding(.top, 2)
+                PixelAvatar(isWorking: session.isWorking)
+                    .padding(.top, 2)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Text(sessionTitle(session))
                             .font(.system(size: 12, weight: .bold))
                             .foregroundColor(.white)
                             .lineLimit(1)
                             .truncationMode(.tail)
+
+                        if let branch = session.gitBranch, !branch.isEmpty {
+                            branchBadge(branch)
+                        }
+
                         Spacer(minLength: 8)
+
                         badge("Claude")
                         if let tokenText = formatTokens(session.usage?.contextTokens) {
                             badge(tokenText, tint: .cyan)
@@ -207,11 +249,7 @@ struct NotchView: View {
                         }
                     }
 
-                    if session.isWorking {
-                        Text("Working...")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.blue.opacity(0.85))
-                    }
+                    statusLabel(for: session)
                 }
             }
             .padding(.horizontal, 8)
@@ -226,6 +264,37 @@ struct NotchView: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             hoveredSessionID = hovering ? session.id : nil
+        }
+    }
+
+    /// Branch indicator — mimics the "^G main ↗" style from the reference UI.
+    private func branchBadge(_ branch: String) -> some View {
+        HStack(spacing: 2) {
+            Text("^G")
+                .foregroundColor(.white.opacity(0.4))
+            Text(branch)
+                .foregroundColor(.white.opacity(0.75))
+            Text("↗")
+                .foregroundColor(.white.opacity(0.4))
+        }
+        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+    }
+
+    /// Status line under a row. Subtle idle text, blue "Working..." animation
+    /// when Claude is mid-turn.
+    @ViewBuilder
+    private func statusLabel(for session: ClaudeSession) -> some View {
+        if session.isWorking {
+            HStack(spacing: 4) {
+                WorkingDot()
+                Text("Working...")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.blue.opacity(0.9))
+            }
+        } else {
+            Text("Done")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.green.opacity(0.6))
         }
     }
 
@@ -293,65 +362,79 @@ struct NotchView: View {
     }
 }
 
+// MARK: - WorkingDot
+
+/// A small pulsing dot used next to the "Working..." status line.
+struct WorkingDot: View {
+    @State private var pulse = false
+    var body: some View {
+        Circle()
+            .fill(Color.blue)
+            .frame(width: 5, height: 5)
+            .opacity(pulse ? 1.0 : 0.35)
+            .shadow(color: .blue.opacity(0.7), radius: pulse ? 3 : 0)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+                    pulse = true
+                }
+            }
+    }
+}
+
 // MARK: - PixelAvatar
 
-/// A tiny 5x5 symmetric pixel-art sprite. The pattern is deterministic per
-/// `seed`, so every session gets a stable but unique avatar. Inspired by
-/// classic space-invader glyphs.
+/// The one canonical ClaudeNotch mascot: a 5x5 space-invader silhouette.
+/// Static when idle, animated with a classic two-frame "walk" when a
+/// session is working. Color shifts with the session state.
 struct PixelAvatar: View {
-    let seed: Int
-    let color: Color
+    let isWorking: Bool
 
-    private let gridSize = 5
+    // Color of the filled pixels. Blue while working, green when idle.
+    private var color: Color { isWorking ? .blue : .green }
+
     private let pixelSize: CGFloat = 3
     private let pixelSpacing: CGFloat = 1
 
+    // Classic invader body — identical in both frames.
+    // Only the bottom row (the "legs") alternates to create the walk.
+    private static let body: [[Bool]] = [
+        [false, true,  true,  true,  false],
+        [true,  true,  true,  true,  true ],
+        [true,  false, true,  false, true ],
+        [true,  true,  true,  true,  true ],
+    ]
+    private static let legsFrameA: [Bool] = [true,  false, false, false, true ]
+    private static let legsFrameB: [Bool] = [false, true,  false, true,  false]
+
     var body: some View {
-        let bits = Self.generatePattern(seed: seed, size: gridSize)
+        Group {
+            if isWorking {
+                // Animate only while working: TimelineView ticks twice a
+                // second and we flip between the two leg frames.
+                TimelineView(.periodic(from: .now, by: 0.45)) { context in
+                    let phase = Int(context.date.timeIntervalSince1970 / 0.45) % 2
+                    grid(legs: phase == 0 ? Self.legsFrameA : Self.legsFrameB)
+                }
+            } else {
+                // Idle: static, frame A (standing).
+                grid(legs: Self.legsFrameA)
+            }
+        }
+        .shadow(color: color.opacity(0.65), radius: isWorking ? 3 : 2)
+    }
+
+    private func grid(legs: [Bool]) -> some View {
+        let rows = Self.body + [legs]
         return VStack(spacing: pixelSpacing) {
-            ForEach(0..<gridSize, id: \.self) { row in
+            ForEach(0..<rows.count, id: \.self) { row in
                 HStack(spacing: pixelSpacing) {
-                    ForEach(0..<gridSize, id: \.self) { col in
+                    ForEach(0..<rows[row].count, id: \.self) { col in
                         Rectangle()
-                            .fill(bits[row][col] ? color : Color.clear)
+                            .fill(rows[row][col] ? color : Color.clear)
                             .frame(width: pixelSize, height: pixelSize)
                     }
                 }
             }
         }
-        .shadow(color: color.opacity(0.5), radius: 2)
-    }
-
-    /// Build a horizontally symmetric bit pattern seeded by `seed`.
-    /// Only half the grid is randomized; the other half mirrors it.
-    private static func generatePattern(seed: Int, size: Int) -> [[Bool]] {
-        var rng = SplitMix64(seed: UInt64(bitPattern: Int64(seed)))
-        var grid = Array(repeating: Array(repeating: false, count: size), count: size)
-        let halfCols = size / 2 + size % 2
-        for row in 0..<size {
-            for col in 0..<halfCols {
-                let bit = rng.nextBool(probability: 0.55)
-                grid[row][col] = bit
-                grid[row][size - 1 - col] = bit
-            }
-        }
-        return grid
-    }
-}
-
-/// Tiny deterministic PRNG for reproducible avatar patterns.
-private struct SplitMix64 {
-    private var state: UInt64
-    init(seed: UInt64) { self.state = seed &+ 0x9E3779B97F4A7C15 }
-    mutating func next() -> UInt64 {
-        state &+= 0x9E3779B97F4A7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-        return z ^ (z >> 31)
-    }
-    mutating func nextBool(probability p: Double) -> Bool {
-        let n = next()
-        return Double(n) / Double(UInt64.max) < p
     }
 }

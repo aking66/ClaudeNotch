@@ -17,6 +17,7 @@ struct ClaudeSession: Identifiable, Hashable {
     let isWorking: Bool        // True if Claude is currently processing
     let cwd: String?           // Authoritative working dir from the jsonl entries
     let usage: UsageStats?     // Cumulative token usage + cost
+    let gitBranch: String?     // Current git branch from the jsonl
 }
 
 /// Polls ~/.claude/projects/ every few seconds and publishes active sessions.
@@ -75,7 +76,7 @@ final class ClaudeWatcher: ObservableObject {
 
             let mod = Self.modDate(latest)
             if mod > cutoff {
-                let (snippet, working, cwd) = Self.parseTail(latest)
+                let (snippet, working, cwd, branch) = Self.parseTail(latest)
 
                 // Expensive full-file scan for usage — cache by mtime so we
                 // only re-parse when the file actually changed.
@@ -96,7 +97,8 @@ final class ClaudeWatcher: ObservableObject {
                     lastSnippet: snippet,
                     isWorking: working,
                     cwd: cwd,
-                    usage: usage
+                    usage: usage,
+                    gitBranch: branch
                 ))
             }
         }
@@ -117,10 +119,11 @@ final class ClaudeWatcher: ObservableObject {
     ///   - isWorking: whether Claude is mid-turn (last entry is user, or assistant's
     ///     last content item is a tool_use awaiting a tool_result)
     ///   - cwd: the working directory recorded in the most recent entry (authoritative)
+    ///   - gitBranch: the git branch recorded in the most recent entry
     /// Reads only the final ~16KB to stay cheap on large sessions.
-    private static func parseTail(_ url: URL) -> (snippet: String?, isWorking: Bool, cwd: String?) {
+    private static func parseTail(_ url: URL) -> (snippet: String?, isWorking: Bool, cwd: String?, branch: String?) {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return (nil, false, nil)
+            return (nil, false, nil, nil)
         }
         defer { try? handle.close() }
 
@@ -131,7 +134,7 @@ final class ClaudeWatcher: ObservableObject {
         let data = (try? handle.readToEnd()) ?? Data()
 
         guard let text = String(data: data, encoding: .utf8) else {
-            return (nil, false, nil)
+            return (nil, false, nil, nil)
         }
 
         // Parse lines in reverse. The very first (last) line may be a partial write
@@ -141,6 +144,7 @@ final class ClaudeWatcher: ObservableObject {
         var lastParsed: [String: Any]? = nil
         var snippet: String? = nil
         var cwd: String? = nil
+        var branch: String? = nil
 
         for line in lines.reversed() {
             guard let lineData = line.data(using: .utf8),
@@ -151,10 +155,13 @@ final class ClaudeWatcher: ObservableObject {
                 lastParsed = obj
             }
 
-            // The cwd field is on every entry; grab it from the first successfully
-            // parsed (most recent) line.
+            // The cwd and gitBranch fields are on every entry; grab them from the
+            // most recent successfully parsed line.
             if cwd == nil, let c = obj["cwd"] as? String, !c.isEmpty {
                 cwd = c
+            }
+            if branch == nil, let b = obj["gitBranch"] as? String, !b.isEmpty {
+                branch = b
             }
 
             // Capture the most recent assistant text content for the snippet.
@@ -177,7 +184,7 @@ final class ClaudeWatcher: ObservableObject {
                 }
             }
 
-            if lastParsed != nil && snippet != nil && cwd != nil { break }
+            if lastParsed != nil && snippet != nil && cwd != nil && branch != nil { break }
         }
 
         // Working = last speaker is user (Claude hasn't replied yet),
@@ -195,7 +202,7 @@ final class ClaudeWatcher: ObservableObject {
             }
         }
 
-        return (snippet, isWorking, cwd)
+        return (snippet, isWorking, cwd, branch)
     }
 
     /// Stream the entire .jsonl file and derive usage stats. `contextTokens`
