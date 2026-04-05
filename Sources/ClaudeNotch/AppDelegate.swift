@@ -28,8 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Bring up the hook server BEFORE we start touching settings.json,
         // so the socket is ready whenever Claude Code first fires a hook.
-        let server = HookServer { event in
+        // Events are routed straight into the watcher so the UI reflects
+        // state changes with sub-100ms latency — no polling wait.
+        let server = HookServer { [weak watcher] event in
             NSLog("ClaudeNotch hook: \(event.hookEventName) session=\(event.sessionId ?? "?") tool=\(event.toolName ?? "-")")
+            watcher?.applyHookEvent(event)
         }
         server.start()
         self.hookServer = server

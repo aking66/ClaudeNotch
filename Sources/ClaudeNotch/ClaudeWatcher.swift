@@ -34,6 +34,28 @@ struct ClaudeSession: Identifiable, Hashable {
 
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
+
+    /// Session UUID extracted from the jsonl filename, e.g.
+    /// "2f627212-805d-4117-b41b-41dddd6f10a1" from "…/<uuid>.jsonl".
+    /// Matches the `session_id` field in hook event payloads.
+    var sessionID: String {
+        id.deletingPathExtension().lastPathComponent
+    }
+
+    /// Return a copy with a different status. Used when a hook event
+    /// arrives and overrides the jsonl-derived value.
+    func with(status newStatus: SessionStatus) -> ClaudeSession {
+        ClaudeSession(
+            id: id,
+            projectName: projectName,
+            lastModified: lastModified,
+            lastSnippet: lastSnippet,
+            status: newStatus,
+            cwd: cwd,
+            usage: usage,
+            gitBranch: gitBranch
+        )
+    }
 }
 
 /// Polls ~/.claude/projects/ every few seconds and publishes active sessions.
@@ -52,6 +74,17 @@ final class ClaudeWatcher: ObservableObject {
     /// Previous status per session, used to detect transitions and fire
     /// notifications / avoid flicker from transient parse failures.
     private var lastStatus: [URL: SessionStatus] = [:]
+
+    /// Sessions built from disk on the last refresh, keyed by URL. The
+    /// published `sessions` array is produced by merging this with hook
+    /// overrides so UI updates can arrive without re-scanning disk.
+    private var baseSessions: [URL: ClaudeSession] = [:]
+
+    /// Session-status overrides driven by Claude Code hook events,
+    /// keyed by session UUID (matches ClaudeSession.sessionID). Hook
+    /// events take precedence over jsonl-derived status because they
+    /// land within milliseconds of the real state change.
+    private var hookStatus: [String: SessionStatus] = [:]
 
     /// If a tool_use is the last assistant entry AND the file has been idle
     /// for longer than this, the session is considered to be waiting for the
@@ -157,12 +190,82 @@ final class ClaudeWatcher: ObservableObject {
             }
         }
 
-        sessions = found.sorted { $0.lastModified > $1.lastModified }
+        // Rebuild the base session map, then merge hook overrides and
+        // publish.
+        baseSessions = Dictionary(uniqueKeysWithValues: found.map { ($0.id, $0) })
+        rebuildPublishedSessions()
 
-        // Prune cache + status entries for sessions that are no longer active.
+        // Prune caches for sessions that are no longer active.
         let activeIDs = Set(found.map { $0.id })
+        let activeSessionIDs = Set(found.map { $0.sessionID })
         usageCache = usageCache.filter { activeIDs.contains($0.key) }
         lastStatus = lastStatus.filter { activeIDs.contains($0.key) }
+        hookStatus = hookStatus.filter { activeSessionIDs.contains($0.key) }
+    }
+
+    // MARK: - Hook-driven updates
+
+    /// Called by the HookServer whenever Claude Code fires an event.
+    /// Updates the status of the matching session immediately (no disk
+    /// scan) and republishes so the UI reflects the change with
+    /// sub-100ms latency.
+    func applyHookEvent(_ event: HookServer.Event) {
+        guard let sid = event.sessionId, !sid.isEmpty,
+              let newStatus = Self.statusFromHookEvent(event.hookEventName)
+        else { return }
+
+        let previous = hookStatus[sid]
+        hookStatus[sid] = newStatus
+
+        // Fire user notifications on the meaningful transitions.
+        if previous != newStatus {
+            let projectName = baseSessions.values
+                .first(where: { $0.sessionID == sid })?.projectName
+                ?? sid
+            handleTransition(
+                from: previous ?? .idle,
+                to: newStatus,
+                projectName: projectName
+            )
+        }
+
+        rebuildPublishedSessions()
+    }
+
+    /// Map a hook event name to the session status it implies.
+    /// Events we don't care about return nil (no update).
+    private static func statusFromHookEvent(_ name: String) -> SessionStatus? {
+        switch name {
+        case "UserPromptSubmit", "PreToolUse":
+            return .working
+        case "PostToolUse":
+            // Claude is still mid-turn between tool calls; a Stop will
+            // arrive when it truly finishes.
+            return .working
+        case "PermissionRequest":
+            return .awaitingApproval
+        case "Notification":
+            // Claude Code uses Notification for "needs your attention",
+            // which in practice means awaiting approval or input.
+            return .awaitingApproval
+        case "Stop":
+            return .idle
+        case "SessionEnd":
+            return .idle
+        default:
+            return nil
+        }
+    }
+
+    /// Merge `baseSessions` with `hookStatus` overrides and publish.
+    private func rebuildPublishedSessions() {
+        let merged = baseSessions.values.map { session -> ClaudeSession in
+            if let hook = hookStatus[session.sessionID] {
+                return session.with(status: hook)
+            }
+            return session
+        }
+        sessions = merged.sorted { $0.lastModified > $1.lastModified }
     }
 
     // MARK: - Status classification
