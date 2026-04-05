@@ -1,4 +1,17 @@
 import Foundation
+import UserNotifications
+
+/// Execution status of a Claude Code session, derived from the jsonl tail
+/// plus file activity signals. Tracked as a proper state machine so the UI
+/// can distinguish "Claude is computing" from "Claude is stuck waiting for
+/// the user to click Allow on a tool request" from "Claude is done".
+enum SessionStatus: String, Hashable {
+    case working           // streaming, running a tool, or user just spoke
+    case awaitingApproval  // tool_use pending with no recent file activity
+    case idle              // last assistant message hit a terminal stop_reason
+
+    var isBusy: Bool { self != .idle }
+}
 
 /// Token usage snapshot for a session. `contextTokens` mirrors what the
 /// Claude Code statusline shows: the current context-window occupancy
@@ -14,10 +27,13 @@ struct ClaudeSession: Identifiable, Hashable {
     let projectName: String
     let lastModified: Date
     let lastSnippet: String?   // Last assistant text, cleaned + truncated
-    let isWorking: Bool        // True if Claude is currently processing
+    let status: SessionStatus  // Working / awaiting approval / idle
     let cwd: String?           // Authoritative working dir from the jsonl entries
     let usage: UsageStats?     // Cumulative token usage + cost
     let gitBranch: String?     // Current git branch from the jsonl
+
+    /// Convenience for call sites that just want "is something happening".
+    var isWorking: Bool { status == .working }
 }
 
 /// Polls ~/.claude/projects/ every few seconds and publishes active sessions.
@@ -33,11 +49,25 @@ final class ClaudeWatcher: ObservableObject {
     /// file mtime at parse time so we can invalidate cheaply.
     private var usageCache: [URL: (mtime: Date, stats: UsageStats)] = [:]
 
+    /// Previous status per session, used to detect transitions and fire
+    /// notifications / avoid flicker from transient parse failures.
+    private var lastStatus: [URL: SessionStatus] = [:]
+
+    /// If a tool_use is the last assistant entry AND the file has been idle
+    /// for longer than this, the session is considered to be waiting for the
+    /// user to approve the tool call rather than actively running it.
+    private let approvalIdleThreshold: TimeInterval = 2.5
+
     func start() {
+        requestNotificationPermission()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func stop() {
@@ -76,7 +106,31 @@ final class ClaudeWatcher: ObservableObject {
 
             let mod = Self.modDate(latest)
             if mod > cutoff {
-                let (snippet, working, cwd, branch) = Self.parseTail(latest)
+                let tail = Self.parseTail(latest)
+
+                // Classify status from the parsed tail. Fall back to the
+                // previously known status on parse failures so we don't
+                // flicker to idle when a giant entry overflows the buffer.
+                let parseFailed = (tail.cwd == nil && tail.snippet == nil && tail.lastEntryKind == .unknown)
+                let now = Date()
+                let status: SessionStatus
+                if parseFailed {
+                    status = lastStatus[latest] ?? .idle
+                } else {
+                    status = Self.classifyStatus(tail: tail, fileModifiedAt: mod, now: now,
+                                                 approvalIdleThreshold: approvalIdleThreshold)
+                }
+
+                // Detect transitions and notify the user when a session
+                // finishes (busy → idle) or needs their attention.
+                let previous = lastStatus[latest]
+                if let previous, previous != status {
+                    handleTransition(
+                        from: previous, to: status,
+                        projectName: Self.decodeProjectName(dir.lastPathComponent)
+                    )
+                }
+                lastStatus[latest] = status
 
                 // Expensive full-file scan for usage — cache by mtime so we
                 // only re-parse when the file actually changed.
@@ -94,68 +148,161 @@ final class ClaudeWatcher: ObservableObject {
                     id: latest,
                     projectName: Self.decodeProjectName(dir.lastPathComponent),
                     lastModified: mod,
-                    lastSnippet: snippet,
-                    isWorking: working,
-                    cwd: cwd,
+                    lastSnippet: tail.snippet,
+                    status: status,
+                    cwd: tail.cwd,
                     usage: usage,
-                    gitBranch: branch
+                    gitBranch: tail.branch
                 ))
             }
         }
 
         sessions = found.sorted { $0.lastModified > $1.lastModified }
 
-        // Prune cache entries for sessions that are no longer active.
+        // Prune cache + status entries for sessions that are no longer active.
         let activeIDs = Set(found.map { $0.id })
         usageCache = usageCache.filter { activeIDs.contains($0.key) }
+        lastStatus = lastStatus.filter { activeIDs.contains($0.key) }
+    }
+
+    // MARK: - Status classification
+
+    /// Turn the raw tail parse into a SessionStatus. The logic hinges on
+    /// the last entry kind and (for tool_use) file activity freshness.
+    private static func classifyStatus(
+        tail: TailParseResult,
+        fileModifiedAt: Date,
+        now: Date,
+        approvalIdleThreshold: TimeInterval
+    ) -> SessionStatus {
+        switch tail.lastEntryKind {
+        case .assistantStreaming:
+            // Assistant entry exists but stop_reason is still null → mid-stream.
+            return .working
+
+        case .assistantToolUse:
+            // Claude requested a tool. If the file has been quiet for more
+            // than a couple seconds, the harness is stuck on a permission
+            // prompt waiting for the user. Otherwise the tool is running.
+            let idleFor = now.timeIntervalSince(fileModifiedAt)
+            return idleFor > approvalIdleThreshold ? .awaitingApproval : .working
+
+        case .assistantEndTurn:
+            return .idle
+
+        case .userMessage:
+            // User just spoke (input or tool_result). Claude will respond.
+            return .working
+
+        case .unknown:
+            return .idle
+        }
+    }
+
+    // MARK: - Notifications
+
+    /// React to a session status change. Fires a user notification on the
+    /// two transitions that matter most: completion and approval-wait.
+    private func handleTransition(
+        from previous: SessionStatus,
+        to current: SessionStatus,
+        projectName: String
+    ) {
+        // Completion: something was happening, now idle.
+        if previous.isBusy && current == .idle {
+            postNotification(
+                title: "Claude finished",
+                body: projectName,
+                sound: true
+            )
+            return
+        }
+
+        // New approval request (either fresh start or transition from working).
+        if current == .awaitingApproval && previous != .awaitingApproval {
+            postNotification(
+                title: "Claude needs approval",
+                body: projectName,
+                sound: true
+            )
+        }
+    }
+
+    private func postNotification(title: String, body: String, sound: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        if sound { content.sound = .default }
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 
     private static func modDate(_ url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
-    /// Read the tail of a .jsonl session file and derive:
-    ///   - lastSnippet: the most recent assistant text content (cleaned, truncated)
-    ///   - isWorking: whether Claude is mid-turn (last entry is user, or assistant's
-    ///     last content item is a tool_use awaiting a tool_result)
-    ///   - cwd: the working directory recorded in the most recent entry (authoritative)
-    ///   - gitBranch: the git branch recorded in the most recent entry
-    /// Reads only the final ~16KB to stay cheap on large sessions.
-    private static func parseTail(_ url: URL) -> (snippet: String?, isWorking: Bool, cwd: String?, branch: String?) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return (nil, false, nil, nil)
-        }
+    /// Classification of the most recent jsonl entry for a session.
+    enum LastEntryKind {
+        case assistantStreaming  // assistant message with stop_reason == null
+        case assistantToolUse    // assistant message with stop_reason == "tool_use"
+        case assistantEndTurn    // assistant message with a terminal stop_reason
+        case userMessage         // user prompt or tool_result
+        case unknown             // parse failed or nothing matched
+    }
+
+    /// Everything parseTail extracts from the session file tail.
+    struct TailParseResult {
+        let snippet: String?
+        let cwd: String?
+        let branch: String?
+        let lastEntryKind: LastEntryKind
+    }
+
+    /// Read the tail of a .jsonl session file and derive a `TailParseResult`.
+    /// Reads up to 512 KB to comfortably contain large tool results; entries
+    /// bigger than that are handled upstream by keeping the previous status
+    /// on parse failure.
+    private static func parseTail(_ url: URL) -> TailParseResult {
+        let empty = TailParseResult(snippet: nil, cwd: nil, branch: nil, lastEntryKind: .unknown)
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return empty }
         defer { try? handle.close() }
 
-        let chunkSize: UInt64 = 16_384
+        let chunkSize: UInt64 = 524_288  // 512 KB
         let fileSize = (try? handle.seekToEnd()) ?? 0
         let start = fileSize > chunkSize ? fileSize - chunkSize : 0
         try? handle.seek(toOffset: start)
         let data = (try? handle.readToEnd()) ?? Data()
 
-        guard let text = String(data: data, encoding: .utf8) else {
-            return (nil, false, nil, nil)
-        }
+        guard let text = String(data: data, encoding: .utf8) else { return empty }
 
-        // Parse lines in reverse. The very first (last) line may be a partial write
-        // from Claude Code currently flushing, so tolerate parse failures.
+        // Parse lines in reverse. The very first (last) line may be a partial
+        // write from Claude Code currently flushing, so tolerate parse failures.
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
 
-        var lastParsed: [String: Any]? = nil
         var snippet: String? = nil
         var cwd: String? = nil
         var branch: String? = nil
+        var lastEntryKind: LastEntryKind = .unknown
+        var lastEntryResolved = false
 
         for line in lines.reversed() {
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
 
-            if lastParsed == nil {
-                lastParsed = obj
+            // First successfully parsed line (most recent) classifies the
+            // last-entry kind for the whole session.
+            if !lastEntryResolved {
+                lastEntryKind = classifyEntry(obj)
+                lastEntryResolved = true
             }
 
-            // The cwd and gitBranch fields are on every entry; grab them from the
+            // cwd and gitBranch appear on every entry; snapshot them from the
             // most recent successfully parsed line.
             if cwd == nil, let c = obj["cwd"] as? String, !c.isEmpty {
                 cwd = c
@@ -184,25 +331,43 @@ final class ClaudeWatcher: ObservableObject {
                 }
             }
 
-            if lastParsed != nil && snippet != nil && cwd != nil && branch != nil { break }
+            if lastEntryResolved && snippet != nil && cwd != nil && branch != nil { break }
         }
 
-        // Working = last speaker is user (Claude hasn't replied yet),
-        // or assistant's final content item is a tool_use (tool still running).
-        var isWorking = false
-        if let entry = lastParsed, let type = entry["type"] as? String {
-            if type == "user" {
-                isWorking = true
-            } else if type == "assistant",
-                      let msg = entry["message"] as? [String: Any],
-                      let contents = msg["content"] as? [[String: Any]],
-                      let last = contents.last,
-                      (last["type"] as? String) == "tool_use" {
-                isWorking = true
+        return TailParseResult(
+            snippet: snippet,
+            cwd: cwd,
+            branch: branch,
+            lastEntryKind: lastEntryKind
+        )
+    }
+
+    /// Map a single parsed jsonl entry to a LastEntryKind. Prefers the
+    /// explicit `stop_reason` field over content-type heuristics.
+    private static func classifyEntry(_ obj: [String: Any]) -> LastEntryKind {
+        guard let type = obj["type"] as? String else { return .unknown }
+
+        if type == "user" {
+            return .userMessage
+        }
+
+        guard type == "assistant",
+              let msg = obj["message"] as? [String: Any]
+        else { return .unknown }
+
+        // stop_reason is the authoritative indicator of turn state.
+        //   null (missing)   → still streaming
+        //   "tool_use"       → tool call pending
+        //   "end_turn" / etc → terminal, ready for next user input
+        if let stopReason = msg["stop_reason"] as? String {
+            if stopReason == "tool_use" {
+                return .assistantToolUse
             }
+            return .assistantEndTurn
         }
 
-        return (snippet, isWorking, cwd, branch)
+        // stop_reason explicitly null or missing → still being written.
+        return .assistantStreaming
     }
 
     /// Stream the entire .jsonl file and derive usage stats. `contextTokens`

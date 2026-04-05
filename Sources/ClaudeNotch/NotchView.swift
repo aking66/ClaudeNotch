@@ -75,7 +75,7 @@ struct NotchView: View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
                 ForEach(watcher.sessions.prefix(4)) { session in
-                    PixelAvatar(isWorking: session.isWorking)
+                    PixelAvatar(status: session.status)
                 }
             }
             Spacer(minLength: 4)
@@ -210,7 +210,7 @@ struct NotchView: View {
             SessionLauncher.open(session)
         } label: {
             HStack(alignment: .top, spacing: 10) {
-                PixelAvatar(isWorking: session.isWorking)
+                PixelAvatar(status: session.status)
                     .padding(.top, 2)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -280,18 +280,25 @@ struct NotchView: View {
         .font(.system(size: 9, weight: .semibold, design: .monospaced))
     }
 
-    /// Status line under a row. Subtle idle text, blue "Working..." animation
-    /// when Claude is mid-turn.
+    /// Status line under a row — per-state label with a tinted indicator.
     @ViewBuilder
     private func statusLabel(for session: ClaudeSession) -> some View {
-        if session.isWorking {
+        switch session.status {
+        case .working:
             HStack(spacing: 4) {
-                WorkingDot()
+                WorkingDot(color: .blue)
                 Text("Working...")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.blue.opacity(0.9))
             }
-        } else {
+        case .awaitingApproval:
+            HStack(spacing: 4) {
+                WorkingDot(color: .orange)
+                Text("Awaiting approval")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.orange.opacity(0.95))
+            }
+        case .idle:
             Text("Done")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.green.opacity(0.6))
@@ -364,15 +371,16 @@ struct NotchView: View {
 
 // MARK: - WorkingDot
 
-/// A small pulsing dot used next to the "Working..." status line.
+/// A small pulsing dot used next to busy-state status labels.
 struct WorkingDot: View {
+    let color: Color
     @State private var pulse = false
     var body: some View {
         Circle()
-            .fill(Color.blue)
+            .fill(color)
             .frame(width: 5, height: 5)
             .opacity(pulse ? 1.0 : 0.35)
-            .shadow(color: .blue.opacity(0.7), radius: pulse ? 3 : 0)
+            .shadow(color: color.opacity(0.7), radius: pulse ? 3 : 0)
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
                     pulse = true
@@ -384,13 +392,23 @@ struct WorkingDot: View {
 // MARK: - PixelAvatar
 
 /// The one canonical ClaudeNotch mascot: a 5x5 space-invader silhouette.
-/// Static when idle, animated with a classic two-frame "walk" when a
-/// session is working. Color shifts with the session state.
+/// Static when idle, animated with a classic two-frame "walk" when the
+/// session is busy. Color shifts with the session status:
+///   - working         → blue
+///   - awaitingApproval → orange
+///   - idle            → green, no animation
 struct PixelAvatar: View {
-    let isWorking: Bool
+    let status: SessionStatus
 
-    // Color of the filled pixels. Blue while working, green when idle.
-    private var color: Color { isWorking ? .blue : .green }
+    private var color: Color {
+        switch status {
+        case .working:          return .blue
+        case .awaitingApproval: return .orange
+        case .idle:             return .green
+        }
+    }
+
+    private var isAnimating: Bool { status.isBusy }
 
     private let pixelSize: CGFloat = 3
     private let pixelSpacing: CGFloat = 1
@@ -408,9 +426,9 @@ struct PixelAvatar: View {
 
     var body: some View {
         Group {
-            if isWorking {
-                // Animate only while working: TimelineView ticks twice a
-                // second and we flip between the two leg frames.
+            if isAnimating {
+                // Animate only while busy: TimelineView ticks twice a second
+                // and we flip between the two leg frames.
                 TimelineView(.periodic(from: .now, by: 0.45)) { context in
                     let phase = Int(context.date.timeIntervalSince1970 / 0.45) % 2
                     grid(legs: phase == 0 ? Self.legsFrameA : Self.legsFrameB)
@@ -420,7 +438,7 @@ struct PixelAvatar: View {
                 grid(legs: Self.legsFrameA)
             }
         }
-        .shadow(color: color.opacity(0.65), radius: isWorking ? 3 : 2)
+        .shadow(color: color.opacity(0.65), radius: isAnimating ? 3 : 2)
     }
 
     private func grid(legs: [Bool]) -> some View {
