@@ -34,6 +34,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server.start()
         self.hookServer = server
 
+        // Idempotently install the hooks into ~/.claude/settings.json. Makes
+        // a timestamped backup whenever it actually has to mutate the file.
+        do {
+            let result = try HookInstaller.install()
+            if result.added > 0 {
+                NSLog("ClaudeNotch: installed \(result.added) new hook(s)")
+            }
+        } catch {
+            NSLog("ClaudeNotch: hook install failed: \(error)")
+        }
+
         setupStatusItem()
     }
 
@@ -58,6 +69,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle.target = self
         menu.addItem(toggle)
         self.toggleMenuItem = toggle
+
+        menu.addItem(.separator())
+
+        let uninstallHooks = NSMenuItem(
+            title: "Uninstall Claude Code Hooks",
+            action: #selector(uninstallHooksAction),
+            keyEquivalent: ""
+        )
+        uninstallHooks.target = self
+        menu.addItem(uninstallHooks)
 
         menu.addItem(.separator())
 
@@ -98,6 +119,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func uninstallHooksAction() {
+        do {
+            let result = try HookInstaller.uninstall()
+            let alert = NSAlert()
+            alert.messageText = "ClaudeNotch hooks removed"
+            alert.informativeText = result.removed > 0
+                ? "Removed \(result.removed) entries from ~/.claude/settings.json. Backup: \(result.backup ?? "—")"
+                : "No ClaudeNotch hooks were installed."
+            alert.runModal()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Uninstall failed"
+            alert.informativeText = "\(error)"
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
     }
 
     // MARK: - Launch at login
