@@ -6,6 +6,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel?
     private var watcher: ClaudeWatcher?
+    private var usageFetcher: UsageFetcher?
     private var hookServer: HookServer?
     private var statusItem: NSStatusItem?
     private var toggleMenuItem: NSMenuItem?
@@ -15,7 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let watcher = ClaudeWatcher()
         self.watcher = watcher
 
-        let rootView = NotchView(watcher: watcher)
+        let usage = UsageFetcher()
+        self.usageFetcher = usage
+        usage.start()
+
+        let rootView = NotchView(watcher: watcher, usage: usage)
         let hosting = NSHostingView(rootView: rootView)
         let fullHeight = NotchPanel.visibleContentHeight + NotchPanel.currentNotchHeight
         hosting.frame = NSRect(x: 0, y: 0, width: NotchPanel.panelWidth, height: fullHeight)

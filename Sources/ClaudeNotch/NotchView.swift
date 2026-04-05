@@ -5,6 +5,7 @@ import SwiftUI
 /// Island and NotchNook.
 struct NotchView: View {
     @ObservedObject var watcher: ClaudeWatcher
+    @ObservedObject var usage: UsageFetcher
     @State private var tick = 0
     @State private var isExpanded = false
     @State private var hoveredSessionID: ClaudeSession.ID?
@@ -169,37 +170,100 @@ struct NotchView: View {
         }
     }
 
-    // Usage limit chip styled after the reference screenshot:
-    // [⚡ 5h 37% 3h41m | 7d 23% 5d]
-    // Real 5h / 7d figures require Anthropic rate-limit headers that Claude
-    // Code does not currently persist locally, so the percentages are shown
-    // as placeholders ("—%") until we wire up a data source.
+    // Usage limit chip: `✦ 5h 64% 2h12m | 7d 25% 4d`
+    // Data comes from GET https://api.anthropic.com/api/oauth/usage using
+    // the OAuth token Claude Code stores in the login keychain. Falls back
+    // to a muted "—%" / "—" when the fetcher hasn't produced a value yet
+    // (expired token, offline, first tick, etc).
     private var usageLimitView: some View {
         HStack(spacing: 6) {
-            // Orange burst glyph, matches the reference aesthetic.
             Image(systemName: "sparkle")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.orange)
 
-            Text("5h")
-                .foregroundColor(.white)
-            Text("—%")
-                .foregroundColor(.green)
-            Text("—")
-                .foregroundColor(.white.opacity(0.4))
+            limitSegment(
+                label: "5h",
+                limit: usage.utilization?.five_hour
+            )
 
             Text("|")
                 .foregroundColor(.white.opacity(0.2))
                 .padding(.horizontal, 2)
 
-            Text("7d")
-                .foregroundColor(.white)
-            Text("—%")
-                .foregroundColor(.green)
-            Text("—")
-                .foregroundColor(.white.opacity(0.4))
+            limitSegment(
+                label: "7d",
+                limit: usage.utilization?.seven_day
+            )
         }
         .font(.system(size: 11, weight: .semibold, design: .monospaced))
+    }
+
+    /// One "5h 64% 2h12m" block inside the usage header.
+    @ViewBuilder
+    private func limitSegment(label: String, limit: Utilization.Limit?) -> some View {
+        Text(label)
+            .foregroundColor(.white)
+
+        if let limit {
+            Text(Self.formatPercent(limit.utilization))
+                .foregroundColor(Self.colorForUtilization(limit.utilization))
+            Text(Self.formatResetCountdown(limit.resets_at))
+                .foregroundColor(.white.opacity(0.45))
+        } else {
+            Text("—%")
+                .foregroundColor(.white.opacity(0.35))
+            Text("—")
+                .foregroundColor(.white.opacity(0.25))
+        }
+    }
+
+    // MARK: - Formatting
+
+    private static func formatPercent(_ value: Double) -> String {
+        "\(Int(value.rounded()))%"
+    }
+
+    /// Green under 50%, amber under 80%, red past 80%.
+    private static func colorForUtilization(_ value: Double) -> Color {
+        switch value {
+        case ..<50:  return .green
+        case ..<80:  return .orange
+        default:     return .red
+        }
+    }
+
+    /// Compact countdown to the reset timestamp:
+    /// < 1m → "now", < 1h → "32m", < 24h → "2h12m", else "5d".
+    private static func formatResetCountdown(_ isoString: String?) -> String {
+        guard let isoString,
+              let resetDate = Self.parseISO8601(isoString)
+        else { return "—" }
+
+        let remaining = resetDate.timeIntervalSinceNow
+        if remaining <= 60 { return "now" }
+
+        let mins = Int(remaining / 60)
+        if mins < 60 { return "\(mins)m" }
+
+        let hours = mins / 60
+        let minsInHour = mins % 60
+        if hours < 24 {
+            return minsInHour == 0 ? "\(hours)h" : "\(hours)h\(minsInHour)m"
+        }
+
+        let days = hours / 24
+        return "\(days)d"
+    }
+
+    /// The Anthropic API returns timestamps with fractional seconds like
+    /// "2026-04-05T16:00:01.170352+00:00". The default ISO8601DateFormatter
+    /// needs `.withFractionalSeconds` to parse that reliably.
+    private static func parseISO8601(_ string: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: string) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: string)
     }
 
     // MARK: - Session row

@@ -15,6 +15,9 @@ Package.resolved
 # Runtime logs
 *.log
 
+# Claude Code reference source tree (kept locally for research)
+reference/
+
 # Xcode (in case added later)
 *.xcodeproj/
 *.xcworkspace/
