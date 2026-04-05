@@ -1,5 +1,13 @@
 import Foundation
 
+/// Token usage snapshot for a session. `contextTokens` mirrors what the
+/// Claude Code statusline shows: the current context-window occupancy
+/// drawn from the most recent assistant message.
+struct UsageStats: Hashable {
+    let contextTokens: Int    // last message: input + cache_read + cache_create
+    let outputTokens: Int     // cumulative output across the whole session
+}
+
 /// A single active Claude Code session discovered on disk.
 struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
@@ -8,6 +16,7 @@ struct ClaudeSession: Identifiable, Hashable {
     let lastSnippet: String?   // Last assistant text, cleaned + truncated
     let isWorking: Bool        // True if Claude is currently processing
     let cwd: String?           // Authoritative working dir from the jsonl entries
+    let usage: UsageStats?     // Cumulative token usage + cost
 }
 
 /// Polls ~/.claude/projects/ every few seconds and publishes active sessions.
@@ -18,6 +27,10 @@ final class ClaudeWatcher: ObservableObject {
 
     private var timer: Timer?
     private let activeWindow: TimeInterval = 5 * 60  // 5 minutes
+
+    /// Cache parsed usage per session file. Keyed by URL, value includes the
+    /// file mtime at parse time so we can invalidate cheaply.
+    private var usageCache: [URL: (mtime: Date, stats: UsageStats)] = [:]
 
     func start() {
         refresh()
@@ -63,18 +76,36 @@ final class ClaudeWatcher: ObservableObject {
             let mod = Self.modDate(latest)
             if mod > cutoff {
                 let (snippet, working, cwd) = Self.parseTail(latest)
+
+                // Expensive full-file scan for usage — cache by mtime so we
+                // only re-parse when the file actually changed.
+                let usage: UsageStats?
+                if let cached = usageCache[latest], cached.mtime == mod {
+                    usage = cached.stats
+                } else {
+                    usage = Self.parseUsage(latest)
+                    if let u = usage {
+                        usageCache[latest] = (mod, u)
+                    }
+                }
+
                 found.append(ClaudeSession(
                     id: latest,
                     projectName: Self.decodeProjectName(dir.lastPathComponent),
                     lastModified: mod,
                     lastSnippet: snippet,
                     isWorking: working,
-                    cwd: cwd
+                    cwd: cwd,
+                    usage: usage
                 ))
             }
         }
 
         sessions = found.sorted { $0.lastModified > $1.lastModified }
+
+        // Prune cache entries for sessions that are no longer active.
+        let activeIDs = Set(found.map { $0.id })
+        usageCache = usageCache.filter { activeIDs.contains($0.key) }
     }
 
     private static func modDate(_ url: URL) -> Date {
@@ -165,6 +196,54 @@ final class ClaudeWatcher: ObservableObject {
         }
 
         return (snippet, isWorking, cwd)
+    }
+
+    /// Stream the entire .jsonl file and derive usage stats. `contextTokens`
+    /// comes from the most recent assistant `usage` block (summing input,
+    /// cache_read, and cache_creation — i.e., the full context window at that
+    /// turn). `outputTokens` is a cumulative sum across every assistant entry.
+    /// Returns nil for empty or unparseable files.
+    private static func parseUsage(_ url: URL) -> UsageStats? {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        var cumulativeOutput = 0
+        var latestContextTokens = 0
+        var sawAny = false
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  (obj["type"] as? String) == "assistant",
+                  let msg = obj["message"] as? [String: Any],
+                  let usage = msg["usage"] as? [String: Any]
+            else { continue }
+
+            sawAny = true
+            cumulativeOutput += (usage["output_tokens"] as? Int) ?? 0
+
+            // Snapshot the latest assistant turn's context-window footprint.
+            let input = (usage["input_tokens"] as? Int) ?? 0
+            let cacheRead = (usage["cache_read_input_tokens"] as? Int) ?? 0
+
+            var cacheCreate = 0
+            if let cc = usage["cache_creation"] as? [String: Any] {
+                cacheCreate += (cc["ephemeral_5m_input_tokens"] as? Int) ?? 0
+                cacheCreate += (cc["ephemeral_1h_input_tokens"] as? Int) ?? 0
+            } else {
+                cacheCreate += (usage["cache_creation_input_tokens"] as? Int) ?? 0
+            }
+
+            latestContextTokens = input + cacheRead + cacheCreate
+        }
+
+        guard sawAny else { return nil }
+
+        return UsageStats(
+            contextTokens: latestContextTokens,
+            outputTokens: cumulativeOutput
+        )
     }
 
     /// Claude Code encodes project paths by replacing "/" with "-".

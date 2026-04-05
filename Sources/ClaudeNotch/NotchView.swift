@@ -72,6 +72,12 @@ struct NotchView: View {
                         .truncationMode(.middle)
                         .foregroundColor(.white.opacity(0.9))
                     Spacer()
+                    if let tokenText = formatTokens(session.usage?.contextTokens) {
+                        Text(tokenText)
+                            .foregroundColor(.cyan.opacity(0.7))
+                        Text("·")
+                            .foregroundColor(.white.opacity(0.25))
+                    }
                     Text(relativeTime(session.lastModified))
                         .foregroundColor(.white.opacity(0.45))
                 }
@@ -116,5 +122,16 @@ struct NotchView: View {
         if seconds < 60 { return "\(seconds)s" }
         if seconds < 3600 { return "\(seconds / 60)m" }
         return "\(seconds / 3600)h"
+    }
+
+    /// Format a token count compactly: "500", "1.2k", "52k", "158k".
+    /// Mirrors Claude Code's statusline style. Returns nil when empty/zero.
+    private func formatTokens(_ n: Int?) -> String? {
+        guard let n, n > 0 else { return nil }
+        if n < 1_000 { return "\(n)" }
+        if n < 10_000 {
+            return String(format: "%.1fk", Double(n) / 1_000.0)
+        }
+        return "\(n / 1_000)k"
     }
 }
