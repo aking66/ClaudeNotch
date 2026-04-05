@@ -14,6 +14,7 @@ final class HookServer {
         let cwd: String?                   // session working directory
         let transcriptPath: String?        // absolute path to the .jsonl
         let toolName: String?              // tool_use events
+        let toolInput: [String: Any]?      // tool parameters (PreToolUse)
         let raw: [String: Any]             // full payload for future use
     }
 
@@ -173,6 +174,7 @@ final class HookServer {
             cwd: obj["cwd"] as? String,
             transcriptPath: obj["transcript_path"] as? String,
             toolName: obj["tool_name"] as? String,
+            toolInput: obj["tool_input"] as? [String: Any],
             raw: obj
         )
     }

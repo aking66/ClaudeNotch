@@ -21,16 +21,26 @@ struct UsageStats: Hashable {
     let outputTokens: Int     // cumulative output across the whole session
 }
 
+/// The tool Claude is currently running (or most recently ran) in a
+/// session. Populated from `PreToolUse` hook events and cleared on
+/// `PostToolUse`; gives the notch a human-readable "what's it doing
+/// right now" badge.
+struct CurrentTool: Hashable {
+    let name: String          // e.g. "Bash", "Edit", "Read"
+    let detail: String?       // a short summary of the tool input
+}
+
 /// A single active Claude Code session discovered on disk.
 struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
     let projectName: String
     let lastModified: Date
-    let lastSnippet: String?   // Last assistant text, cleaned + truncated
-    let status: SessionStatus  // Working / awaiting approval / idle
-    let cwd: String?           // Authoritative working dir from the jsonl entries
-    let usage: UsageStats?     // Cumulative token usage + cost
-    let gitBranch: String?     // Current git branch from the jsonl
+    let lastSnippet: String?    // Last assistant text, cleaned + truncated
+    let status: SessionStatus   // Working / awaiting approval / idle
+    let cwd: String?            // Authoritative working dir from the jsonl entries
+    let usage: UsageStats?      // Cumulative token usage + cost
+    let gitBranch: String?      // Current git branch from the jsonl
+    let currentTool: CurrentTool?  // Tool currently in flight (hook-driven)
 
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
@@ -53,7 +63,23 @@ struct ClaudeSession: Identifiable, Hashable {
             status: newStatus,
             cwd: cwd,
             usage: usage,
-            gitBranch: gitBranch
+            gitBranch: gitBranch,
+            currentTool: currentTool
+        )
+    }
+
+    /// Return a copy with a different currentTool.
+    func with(currentTool newTool: CurrentTool?) -> ClaudeSession {
+        ClaudeSession(
+            id: id,
+            projectName: projectName,
+            lastModified: lastModified,
+            lastSnippet: lastSnippet,
+            status: status,
+            cwd: cwd,
+            usage: usage,
+            gitBranch: gitBranch,
+            currentTool: newTool
         )
     }
 }
@@ -65,7 +91,7 @@ final class ClaudeWatcher: ObservableObject {
     @Published private(set) var sessions: [ClaudeSession] = []
 
     private var timer: Timer?
-    private let activeWindow: TimeInterval = 5 * 60  // 5 minutes
+    private let activeWindow: TimeInterval = 20 * 60  // 20 minutes
 
     /// Cache parsed usage per session file. Keyed by URL, value includes the
     /// file mtime at parse time so we can invalidate cheaply.
@@ -79,6 +105,10 @@ final class ClaudeWatcher: ObservableObject {
     /// published `sessions` array is produced by merging this with hook
     /// overrides so UI updates can arrive without re-scanning disk.
     private var baseSessions: [URL: ClaudeSession] = [:]
+
+    /// Current in-flight tool per session UUID, populated from
+    /// `PreToolUse` hook events and cleared on `PostToolUse`.
+    private var currentTools: [String: CurrentTool] = [:]
 
     /// Session-status overrides driven by Claude Code hook events.
     /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
@@ -196,7 +226,8 @@ final class ClaudeWatcher: ObservableObject {
                     status: status,
                     cwd: tail.cwd,
                     usage: usage,
-                    gitBranch: tail.branch
+                    gitBranch: tail.branch,
+                    currentTool: nil
                 ))
             }
         }
@@ -212,6 +243,7 @@ final class ClaudeWatcher: ObservableObject {
         usageCache = usageCache.filter { activeIDs.contains($0.key) }
         lastStatus = lastStatus.filter { activeIDs.contains($0.key) }
         hookStatus = hookStatus.filter { activeSessionIDs.contains($0.key) }
+        currentTools = currentTools.filter { activeSessionIDs.contains($0.key) }
     }
 
     // MARK: - Hook-driven updates
@@ -221,9 +253,31 @@ final class ClaudeWatcher: ObservableObject {
     /// scan) and republishes so the UI reflects the change with
     /// sub-100ms latency.
     func applyHookEvent(_ event: HookServer.Event) {
-        guard let sid = event.sessionId, !sid.isEmpty,
-              let newStatus = Self.statusFromHookEvent(event.hookEventName)
-        else { return }
+        guard let sid = event.sessionId, !sid.isEmpty else { return }
+
+        // Track the in-flight tool per session so the UI can show a
+        // "Bash: git show …" badge while it's running.
+        switch event.hookEventName {
+        case "PreToolUse":
+            if let name = event.toolName {
+                currentTools[sid] = CurrentTool(
+                    name: name,
+                    detail: Self.describeToolInput(
+                        toolName: name,
+                        input: event.toolInput
+                    )
+                )
+            }
+        case "PostToolUse", "Stop", "SessionEnd":
+            currentTools[sid] = nil
+        default:
+            break
+        }
+
+        guard let newStatus = Self.statusFromHookEvent(event.hookEventName) else {
+            rebuildPublishedSessions()
+            return
+        }
 
         let previousStatus = hookStatus[sid]?.status
         hookStatus[sid] = (newStatus, Date())
@@ -241,6 +295,43 @@ final class ClaudeWatcher: ObservableObject {
         }
 
         rebuildPublishedSessions()
+    }
+
+    /// Turn a tool_input payload into a short human string. Falls back
+    /// to nil for tools we don't specifically recognise — the UI will
+    /// just show the bare tool name in that case.
+    private static func describeToolInput(toolName: String, input: [String: Any]?) -> String? {
+        guard let input else { return nil }
+        let raw: String?
+        switch toolName {
+        case "Bash":
+            raw = input["command"] as? String
+        case "Read", "Edit", "Write", "NotebookEdit":
+            if let path = input["file_path"] as? String {
+                raw = (path as NSString).lastPathComponent
+            } else {
+                raw = nil
+            }
+        case "Glob":
+            raw = input["pattern"] as? String
+        case "Grep":
+            raw = input["pattern"] as? String
+        case "Task", "Agent":
+            let type = input["subagent_type"] as? String ?? ""
+            let desc = input["description"] as? String ?? ""
+            raw = type.isEmpty ? desc : "\(type): \(desc)"
+        case "WebFetch":
+            raw = input["url"] as? String
+        case "WebSearch":
+            raw = input["query"] as? String
+        default:
+            raw = nil
+        }
+        guard var s = raw else { return nil }
+        s = s.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        if s.count > 80 { s = String(s.prefix(80)) + "…" }
+        return s.isEmpty ? nil : s
     }
 
     /// Map a hook event name to the session status it implies.
@@ -269,19 +360,22 @@ final class ClaudeWatcher: ObservableObject {
         }
     }
 
-    /// Merge `baseSessions` with `hookStatus` overrides and publish.
-    /// Hook overrides older than `hookStatusTTL` are ignored — we fall
-    /// back to the jsonl-derived status so a stuck awaitingApproval
-    /// (e.g. from a session that predated the hook installer) can
-    /// recover on its own once the file changes again.
+    /// Merge `baseSessions` with `hookStatus` + `currentTools` overrides
+    /// and publish. Hook status overrides older than `hookStatusTTL` are
+    /// ignored so a stuck awaitingApproval (e.g. from a session that
+    /// predated the hook installer) recovers on its own.
     private func rebuildPublishedSessions() {
         let now = Date()
         let merged = baseSessions.values.map { session -> ClaudeSession in
+            var result = session
             if let hook = hookStatus[session.sessionID],
                now.timeIntervalSince(hook.at) < hookStatusTTL {
-                return session.with(status: hook.status)
+                result = result.with(status: hook.status)
             }
-            return session
+            if let tool = currentTools[session.sessionID] {
+                result = result.with(currentTool: tool)
+            }
+            return result
         }
         sessions = merged.sorted { $0.lastModified > $1.lastModified }
     }

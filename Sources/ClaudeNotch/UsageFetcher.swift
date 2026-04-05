@@ -35,10 +35,23 @@ final class UsageFetcher: ObservableObject {
     @Published private(set) var lastError: String?
 
     private var timer: Timer?
-    /// Background refresh cadence. Tight enough to stay within ~1% of
-    /// the live Anthropic counters.
-    private let pollInterval: TimeInterval = 2 * 60
+    /// Background refresh cadence. Tight enough to stay within a few
+    /// percent of the live Anthropic counters without sharing the
+    /// endpoint's rate limit with other menubar tools (Vibe Island etc.).
+    private let pollInterval: TimeInterval = 3 * 60
+
+    /// Minimum gap between any two attempts, regardless of trigger
+    /// (hover, hook, background timer). Prevents a burst at launch when
+    /// several triggers fire at once.
+    private let minAttemptInterval: TimeInterval = 45
+
+    /// Cooldown applied after a 429. Anthropic's usage endpoint is shared
+    /// across clients so we back off aggressively when throttled.
+    private let rateLimitedCooldown: TimeInterval = 5 * 60
+
     private var inFlight = false
+    private var lastAttempt: Date?
+    private var rateLimitedUntil: Date?
 
     func start() {
         Task { await self.fetch() }
@@ -57,9 +70,10 @@ final class UsageFetcher: ObservableObject {
         Task { await fetch() }
     }
 
-    /// Re-fetch only if the cached value is older than `maxAge` seconds.
+    /// Re-fetch only if the cached value is older than `maxAge` seconds
+    /// AND the attempt-level cooldown / rate-limit window allows it.
     /// Used by opportunistic triggers (hover expand, PostToolUse hook)
-    /// so the UI is always ~freshest possible without hammering the API.
+    /// so the UI is fresh without ever hammering the API.
     func refreshIfStale(maxAge: TimeInterval) {
         if let lastFetched, Date().timeIntervalSince(lastFetched) < maxAge {
             return
@@ -76,7 +90,21 @@ final class UsageFetcher: ObservableObject {
 
     private func fetch() async {
         guard !inFlight else { return }
+
+        let now = Date()
+
+        // Honour the 429 back-off window.
+        if let until = rateLimitedUntil, now < until {
+            return
+        }
+
+        // Rate-limit ourselves between any two attempts, successful or not.
+        if let last = lastAttempt, now.timeIntervalSince(last) < minAttemptInterval {
+            return
+        }
+
         inFlight = true
+        lastAttempt = now
         defer { inFlight = false }
 
         guard let tokens = KeychainReader.claudeCodeOAuthTokens() else {
@@ -102,14 +130,28 @@ final class UsageFetcher: ObservableObject {
                 lastError = "Invalid HTTP response"
                 return
             }
+
+            if http.statusCode == 429 {
+                // Throttled by the shared usage endpoint. Stand down for
+                // a while so we don't make it worse. Keep any previous
+                // `utilization` value in place so the UI shows stale
+                // numbers rather than dashes.
+                rateLimitedUntil = Date().addingTimeInterval(rateLimitedCooldown)
+                lastError = "Rate limited (429) — backing off 5 min"
+                NSLog("ClaudeNotch: usage endpoint 429 — cooling down until \(rateLimitedUntil!)")
+                return
+            }
+
             guard http.statusCode == 200 else {
                 lastError = "HTTP \(http.statusCode)"
                 return
             }
+
             let decoded = try JSONDecoder().decode(Utilization.self, from: data)
             utilization = decoded
             lastFetched = Date()
             lastError = nil
+            rateLimitedUntil = nil   // clear any lingering back-off
         } catch {
             lastError = "\(error.localizedDescription)"
         }

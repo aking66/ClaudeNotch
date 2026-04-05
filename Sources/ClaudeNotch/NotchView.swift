@@ -319,6 +319,10 @@ struct NotchView: View {
                         }
                     }
 
+                    if let tool = session.currentTool {
+                        toolBadge(tool)
+                    }
+
                     statusLabel(for: session)
                 }
             }
@@ -334,6 +338,36 @@ struct NotchView: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             hoveredSessionID = hovering ? session.id : nil
+        }
+    }
+
+    /// Inline tool badge like "Bash git show 3864d21 …" shown while Claude
+    /// is running (or just ran) a tool. Colour-codes the tool name so Bash
+    /// and risky tools stand out from plain Read/Grep.
+    private func toolBadge(_ tool: CurrentTool) -> some View {
+        HStack(spacing: 4) {
+            Text(tool.name)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(Self.tintForTool(tool.name))
+            if let detail = tool.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.55))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private static func tintForTool(_ name: String) -> Color {
+        switch name {
+        case "Bash":                       return .orange
+        case "Edit", "Write", "NotebookEdit": return .cyan
+        case "Read":                       return .green.opacity(0.85)
+        case "Grep", "Glob":               return .purple
+        case "Task", "Agent":              return .pink
+        case "WebFetch", "WebSearch":      return .blue
+        default:                           return .white.opacity(0.8)
         }
     }
 
