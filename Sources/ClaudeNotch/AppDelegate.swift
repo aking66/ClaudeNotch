@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 @MainActor
@@ -7,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var watcher: ClaudeWatcher?
     private var statusItem: NSStatusItem?
     private var toggleMenuItem: NSMenuItem?
+    private var launchAtLoginMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let watcher = ClaudeWatcher()
@@ -14,7 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let rootView = NotchView(watcher: watcher)
         let hosting = NSHostingView(rootView: rootView)
-        hosting.frame = NSRect(x: 0, y: 0, width: NotchPanel.panelWidth, height: NotchPanel.panelHeight)
+        let fullHeight = NotchPanel.visibleContentHeight + NotchPanel.currentNotchHeight
+        hosting.frame = NSRect(x: 0, y: 0, width: NotchPanel.panelWidth, height: fullHeight)
 
         let panel = NotchPanel(contentView: hosting)
         panel.orderFrontRegardless()
@@ -49,6 +52,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let launchAtLogin = NSMenuItem(
+            title: "Launch at Login",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        launchAtLogin.target = self
+        menu.addItem(launchAtLogin)
+        self.launchAtLoginMenuItem = launchAtLogin
+        refreshLaunchAtLoginState()
+
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit ClaudeNotch",
             action: #selector(quitApp),
@@ -74,5 +89,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Launch at login
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            NSLog("ClaudeNotch: failed to toggle launch-at-login: \(error)")
+        }
+        refreshLaunchAtLoginState()
+    }
+
+    private func refreshLaunchAtLoginState() {
+        launchAtLoginMenuItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 }
