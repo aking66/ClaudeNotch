@@ -170,6 +170,11 @@ final class ClaudeWatcher: ObservableObject {
     /// Tasks per session UUID, populated from TodoWrite tool events.
     private var sessionTodos: [String: [TodoItem]] = [:]
 
+    /// Pending subagent type/description from Agent PreToolUse, used when
+    /// SubagentStart doesn't carry these fields directly.
+    private var pendingAgentType: [String: String] = [:]
+    private var pendingAgentDesc: [String: String] = [:]
+
     /// Session-status overrides driven by Claude Code hook events.
     /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
     /// override carries the timestamp it was written so it can expire.
@@ -347,11 +352,17 @@ final class ClaudeWatcher: ObservableObject {
         switch event.hookEventName {
         case "SubagentStart":
             let subId = event.raw["subagent_id"] as? String ?? UUID().uuidString
+            // Try multiple field names — Claude Code may use different keys
             let agentType = event.raw["subagent_type"] as? String
+                ?? event.raw["agent_type"] as? String
                 ?? event.toolInput?["subagent_type"] as? String
+                ?? pendingAgentType[sid]
                 ?? "agent"
             let desc = event.raw["description"] as? String
                 ?? event.toolInput?["description"] as? String
+                ?? pendingAgentDesc[sid]
+            pendingAgentType.removeValue(forKey: sid)
+            pendingAgentDesc.removeValue(forKey: sid)
             let sub = Subagent(
                 id: subId,
                 agentType: agentType,
@@ -369,6 +380,7 @@ final class ClaudeWatcher: ObservableObject {
             if var subs = sessionSubagents[sid] {
                 if let idx = subs.firstIndex(where: { $0.id == subId }) {
                     subs[idx].status = .done
+                    subs[idx].currentTool = nil
                     sessionSubagents[sid] = subs
                 }
             }
@@ -378,6 +390,36 @@ final class ClaudeWatcher: ObservableObject {
 
         default:
             break
+        }
+
+        // When Agent tool fires PreToolUse, capture type/description for
+        // the upcoming SubagentStart (which may lack these fields).
+        if event.hookEventName == "PreToolUse",
+           let name = event.toolName, (name == "Agent" || name == "Task") {
+            if let t = event.toolInput?["subagent_type"] as? String { pendingAgentType[sid] = t }
+            if let d = event.toolInput?["description"] as? String { pendingAgentDesc[sid] = d }
+        }
+
+        // Attribute tool events to the active running subagent so the UI
+        // shows what each subagent is doing (e.g. "└ $ grep ...").
+        if event.hookEventName == "PreToolUse",
+           let name = event.toolName, name != "Agent" && name != "Task",
+           var subs = sessionSubagents[sid],
+           let idx = subs.lastIndex(where: { $0.status == .running }) {
+            let desc = event.toolInput?["description"] as? String
+            subs[idx].currentTool = CurrentTool(
+                name: name,
+                detail: Self.describeToolInput(toolName: name, input: event.toolInput),
+                description: desc,
+                diffPreview: nil
+            )
+            sessionSubagents[sid] = subs
+        }
+        if event.hookEventName == "PostToolUse",
+           var subs = sessionSubagents[sid],
+           let idx = subs.lastIndex(where: { $0.status == .running }) {
+            subs[idx].currentTool = nil
+            sessionSubagents[sid] = subs
         }
 
         // Track TodoWrite tool events to populate the tasks section.
