@@ -14,7 +14,7 @@ final class NotchPanel: NSPanel {
     /// Visible content height below the notch region. The full panel frame
     /// includes an extra `notchHeight` at the top that is physically hidden
     /// behind the display cutout.
-    static let visibleContentHeight: CGFloat = 220
+    static let visibleContentHeight: CGFloat = 380
 
     /// Notch height of the active main screen at launch (cached for layout).
     static var currentNotchHeight: CGFloat {

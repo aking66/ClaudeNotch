@@ -112,6 +112,16 @@ final class HookServer {
 
     // MARK: - Permission approval resolution
 
+    /// Called when a PostToolUse event arrives — if the user approved from
+    /// the terminal, the bridge is already gone. Close the stale fd so the
+    /// permission card disappears from the UI.
+    func clearPendingApproval(sessionId: String) {
+        if let clientFd = pendingApprovals.removeValue(forKey: sessionId) {
+            close(clientFd)
+            NSLog("ClaudeNotch: cleared stale pending approval for \(sessionId)")
+        }
+    }
+
     /// Called from the UI when the user clicks Allow / Deny on a pending
     /// permission prompt. Writes the decision JSON back to the bridge
     /// process that's blocking on the socket, which in turn writes it to
@@ -122,9 +132,24 @@ final class HookServer {
             return
         }
 
-        let response: [String: Any] = [
-            "hookSpecificOutput": ["decision": decision]
-        ]
+        // Claude Code PermissionRequest response format:
+        //   "allow"  → hookSpecificOutput.decision.behavior = "allow"
+        //   "deny"   → hookSpecificOutput.decision.behavior = "deny"
+        //   "bypass" → top-level decision = "approve" (bypasses permission system)
+        let response: [String: Any]
+        if decision == "bypass" {
+            response = ["decision": "approve"]
+        } else {
+            let decisionObj: [String: Any] = decision == "deny"
+                ? ["behavior": "deny", "message": "Denied via ClaudeNotch"]
+                : ["behavior": "allow"]
+            response = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PermissionRequest",
+                    "decision": decisionObj
+                ] as [String: Any]
+            ]
+        }
         if let data = try? JSONSerialization.data(withJSONObject: response) {
             data.withUnsafeBytes { buf in
                 guard let base = buf.baseAddress else { return }
@@ -177,6 +202,9 @@ final class HookServer {
                     if let old = self.pendingApprovals[sid] {
                         close(old)
                     }
+                    // Prevent SIGPIPE on this specific fd as well.
+                    var on: Int32 = 1
+                    setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                     self.pendingApprovals[sid] = clientFd
                 }
 

@@ -22,6 +22,16 @@ struct UsageStats: Hashable {
     let outputTokens: Int     // cumulative output across the whole session
 }
 
+/// Preview of code changes for Edit/Write permission requests.
+/// Shown in the permission card so the user can review the actual
+/// diff before approving.
+struct DiffPreview: Hashable {
+    let filePath: String       // full path to the file
+    let oldString: String?     // Edit: text being replaced (max ~500 chars)
+    let newString: String?     // Edit: replacement text (max ~500 chars)
+    let content: String?       // Write: new file content preview (max ~1000 chars)
+}
+
 /// The tool Claude is currently running (or most recently ran) in a
 /// session. Populated from `PreToolUse` hook events and cleared on
 /// `PostToolUse`; gives the notch a human-readable "what's it doing
@@ -30,6 +40,7 @@ struct CurrentTool: Hashable {
     let name: String          // e.g. "Bash", "Edit", "Read"
     let detail: String?       // a short summary of the tool input
     let description: String?  // human description from tool_input.description
+    let diffPreview: DiffPreview?  // code changes for Edit/Write tools
 }
 
 /// A subagent spawned by the Agent tool within a parent session.
@@ -48,6 +59,19 @@ enum SubagentStatus: String, Hashable {
     case done = "Done"
 }
 
+/// A task item from Claude's TodoWrite tool.
+struct TodoItem: Hashable, Identifiable {
+    let id: String              // content hash for identity
+    let content: String         // task description
+    let status: TodoStatus      // pending / in_progress / completed
+}
+
+enum TodoStatus: String, Hashable {
+    case pending = "pending"
+    case inProgress = "in_progress"
+    case completed = "completed"
+}
+
 /// A single active Claude Code session discovered on disk.
 struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
@@ -62,6 +86,7 @@ struct ClaudeSession: Identifiable, Hashable {
     let gitBranch: String?          // Current git branch from the jsonl
     let currentTool: CurrentTool?   // Tool currently in flight (hook-driven)
     let subagents: [Subagent]       // Active/completed subagents (hook-driven)
+    let todos: [TodoItem]           // Tasks from TodoWrite tool (hook-driven)
 
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
@@ -78,7 +103,7 @@ struct ClaudeSession: Identifiable, Hashable {
                       lastSnippet: lastSnippet, assistantFull: assistantFull,
                       lastUserMessage: lastUserMessage, status: newStatus,
                       cwd: cwd, usage: usage, gitBranch: gitBranch,
-                      currentTool: currentTool, subagents: subagents)
+                      currentTool: currentTool, subagents: subagents, todos: todos)
     }
 
     func with(currentTool newTool: CurrentTool?) -> ClaudeSession {
@@ -86,7 +111,7 @@ struct ClaudeSession: Identifiable, Hashable {
                       lastSnippet: lastSnippet, assistantFull: assistantFull,
                       lastUserMessage: lastUserMessage, status: status,
                       cwd: cwd, usage: usage, gitBranch: gitBranch,
-                      currentTool: newTool, subagents: subagents)
+                      currentTool: newTool, subagents: subagents, todos: todos)
     }
 
     func with(subagents newSubagents: [Subagent]) -> ClaudeSession {
@@ -94,7 +119,15 @@ struct ClaudeSession: Identifiable, Hashable {
                       lastSnippet: lastSnippet, assistantFull: assistantFull,
                       lastUserMessage: lastUserMessage, status: status,
                       cwd: cwd, usage: usage, gitBranch: gitBranch,
-                      currentTool: currentTool, subagents: newSubagents)
+                      currentTool: currentTool, subagents: newSubagents, todos: todos)
+    }
+
+    func with(todos newTodos: [TodoItem]) -> ClaudeSession {
+        ClaudeSession(id: id, projectName: projectName, lastModified: lastModified,
+                      lastSnippet: lastSnippet, assistantFull: assistantFull,
+                      lastUserMessage: lastUserMessage, status: status,
+                      cwd: cwd, usage: usage, gitBranch: gitBranch,
+                      currentTool: currentTool, subagents: subagents, todos: newTodos)
     }
 }
 
@@ -133,6 +166,9 @@ final class ClaudeWatcher: ObservableObject {
 
     /// Active subagents per parent session UUID.
     private var sessionSubagents: [String: [Subagent]] = [:]
+
+    /// Tasks per session UUID, populated from TodoWrite tool events.
+    private var sessionTodos: [String: [TodoItem]] = [:]
 
     /// Session-status overrides driven by Claude Code hook events.
     /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
@@ -254,7 +290,8 @@ final class ClaudeWatcher: ObservableObject {
                     usage: usage,
                     gitBranch: tail.branch,
                     currentTool: nil,
-                    subagents: []
+                    subagents: [],
+                    todos: tail.todos
                 ))
             }
         }
@@ -272,6 +309,7 @@ final class ClaudeWatcher: ObservableObject {
         hookStatus = hookStatus.filter { activeSessionIDs.contains($0.key) }
         currentTools = currentTools.filter { activeSessionIDs.contains($0.key) }
         sessionSubagents = sessionSubagents.filter { activeSessionIDs.contains($0.key) }
+        sessionTodos = sessionTodos.filter { activeSessionIDs.contains($0.key) }
     }
 
     // MARK: - Hook-driven updates
@@ -295,7 +333,8 @@ final class ClaudeWatcher: ObservableObject {
                         toolName: name,
                         input: event.toolInput
                     ),
-                    description: desc
+                    description: desc,
+                    diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput)
                 )
             }
         case "PostToolUse", "Stop", "SessionEnd":
@@ -339,6 +378,44 @@ final class ClaudeWatcher: ObservableObject {
 
         default:
             break
+        }
+
+        // Track TodoWrite tool events to populate the tasks section.
+        if (event.hookEventName == "PostToolUse" || event.hookEventName == "PreToolUse"),
+           event.toolName == "TodoWrite" || event.toolName == "TodoWriteTool",
+           let input = event.toolInput,
+           let todosRaw = input["todos"] as? [[String: Any]] {
+            let todos = todosRaw.compactMap { obj -> TodoItem? in
+                guard let content = obj["content"] as? String,
+                      let statusStr = obj["status"] as? String else { return nil }
+                let status: TodoStatus
+                switch statusStr {
+                case "completed": status = .completed
+                case "in_progress": status = .inProgress
+                default: status = .pending
+                }
+                return TodoItem(id: content, content: content, status: status)
+            }
+            if !todos.isEmpty {
+                sessionTodos[sid] = todos
+            }
+        }
+
+        // Clear todos on session end.
+        if event.hookEventName == "SessionEnd" {
+            sessionTodos[sid] = nil
+        }
+
+        // PermissionRequest also carries tool_input — update currentTools
+        // so the diff preview is available even if PreToolUse was missed.
+        if event.hookEventName == "PermissionRequest", let name = event.toolName {
+            let desc = event.toolInput?["description"] as? String
+            currentTools[sid] = CurrentTool(
+                name: name,
+                detail: Self.describeToolInput(toolName: name, input: event.toolInput),
+                description: desc,
+                diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput)
+            )
         }
 
         // Auto-expand the notch panel focused on THIS session.
@@ -407,6 +484,26 @@ final class ClaudeWatcher: ObservableObject {
         return s.isEmpty ? nil : s
     }
 
+    /// Extract a diff preview from tool_input for Edit/Write tools.
+    /// Returns nil for tools that don't produce code changes.
+    private static func extractDiffPreview(toolName: String, input: [String: Any]?) -> DiffPreview? {
+        guard let input else { return nil }
+        switch toolName {
+        case "Edit", "MultiEdit":
+            guard let filePath = input["file_path"] as? String else { return nil }
+            let old = (input["old_string"] as? String).map { String($0.prefix(500)) }
+            let new = (input["new_string"] as? String).map { String($0.prefix(500)) }
+            guard old != nil || new != nil else { return nil }
+            return DiffPreview(filePath: filePath, oldString: old, newString: new, content: nil)
+        case "Write", "NotebookEdit":
+            guard let filePath = input["file_path"] as? String else { return nil }
+            let content = (input["content"] as? String).map { String($0.prefix(1000)) }
+            return DiffPreview(filePath: filePath, oldString: nil, newString: nil, content: content)
+        default:
+            return nil
+        }
+    }
+
     /// Map a hook event name to the session status it implies.
     /// Events we don't care about return nil (no update).
     private static func statusFromHookEvent(_ name: String) -> SessionStatus? {
@@ -450,6 +547,9 @@ final class ClaudeWatcher: ObservableObject {
             }
             if let subs = sessionSubagents[session.sessionID], !subs.isEmpty {
                 result = result.with(subagents: subs)
+            }
+            if let todos = sessionTodos[session.sessionID], !todos.isEmpty {
+                result = result.with(todos: todos)
             }
             return result
         }
@@ -548,6 +648,7 @@ final class ClaudeWatcher: ObservableObject {
         let cwd: String?
         let branch: String?
         let lastEntryKind: LastEntryKind
+        let todos: [TodoItem]              // tasks from most recent TodoWrite
     }
 
     /// Read the tail of a .jsonl session file and derive a `TailParseResult`.
@@ -555,7 +656,7 @@ final class ClaudeWatcher: ObservableObject {
     /// bigger than that are handled upstream by keeping the previous status
     /// on parse failure.
     private static func parseTail(_ url: URL) -> TailParseResult {
-        let empty = TailParseResult(snippet: nil, assistantFull: nil, lastUserMessage: nil, cwd: nil, branch: nil, lastEntryKind: .unknown)
+        let empty = TailParseResult(snippet: nil, assistantFull: nil, lastUserMessage: nil, cwd: nil, branch: nil, lastEntryKind: .unknown, todos: [])
 
         guard let handle = try? FileHandle(forReadingFrom: url) else { return empty }
         defer { try? handle.close() }
@@ -579,6 +680,8 @@ final class ClaudeWatcher: ObservableObject {
         var branch: String? = nil
         var lastEntryKind: LastEntryKind = .unknown
         var lastEntryResolved = false
+        var todos: [TodoItem] = []
+        var todosFound = false
 
         for line in lines.reversed() {
             guard let lineData = line.data(using: .utf8),
@@ -646,8 +749,35 @@ final class ClaudeWatcher: ObservableObject {
                 }
             }
 
+            // Find the most recent TodoWrite tool_use to populate tasks.
+            if !todosFound, entryType == "assistant",
+               let msg = obj["message"] as? [String: Any],
+               let contents = msg["content"] as? [[String: Any]] {
+                for c in contents {
+                    if (c["type"] as? String) == "tool_use",
+                       let name = c["name"] as? String,
+                       (name == "TodoWrite" || name == "TodoWriteTool"),
+                       let input = c["input"] as? [String: Any],
+                       let rawTodos = input["todos"] as? [[String: Any]] {
+                        todos = rawTodos.compactMap { t -> TodoItem? in
+                            guard let content = t["content"] as? String,
+                                  let st = t["status"] as? String else { return nil }
+                            let status: TodoStatus
+                            switch st {
+                            case "completed": status = .completed
+                            case "in_progress": status = .inProgress
+                            default: status = .pending
+                            }
+                            return TodoItem(id: content, content: content, status: status)
+                        }
+                        todosFound = true
+                        break
+                    }
+                }
+            }
+
             let allFound = lastEntryResolved && snippet != nil && cwd != nil
-                && branch != nil && lastUserMessage != nil
+                && branch != nil && lastUserMessage != nil && todosFound
             if allFound { break }
         }
 
@@ -657,7 +787,8 @@ final class ClaudeWatcher: ObservableObject {
             lastUserMessage: lastUserMessage,
             cwd: cwd,
             branch: branch,
-            lastEntryKind: lastEntryKind
+            lastEntryKind: lastEntryKind,
+            todos: todos
         )
     }
 

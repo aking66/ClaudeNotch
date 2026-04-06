@@ -28,7 +28,7 @@ struct NotchView: View {
     private let collapsedWidth: CGFloat = 300
     private let collapsedContentHeight: CGFloat = 30
     private let expandedWidth: CGFloat = 560
-    private let expandedContentHeight: CGFloat = 200
+    private let expandedContentHeight: CGFloat = 360
 
     private var currentWidth: CGFloat { isExpanded ? expandedWidth : collapsedWidth }
     private var currentHeight: CGFloat {
@@ -76,9 +76,9 @@ struct NotchView: View {
                     focusedSessionId = sid
                     showAllSessions = false
                 }
-                // Auto-collapse after 12 seconds if user doesn't interact
+                // Auto-collapse after 25 seconds if user doesn't interact
                 let counter = watcher.autoExpandCounter
-                DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
                     if autoExpanded && watcher.autoExpandCounter == counter {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
                             isExpanded = false
@@ -132,42 +132,46 @@ struct NotchView: View {
     private var expandedContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            if watcher.sessions.isEmpty {
-                Text("> no active sessions")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.4))
-                    .padding(.top, 4)
-            } else if let fid = focusedSessionId,
-                      let focused = watcher.sessions.first(where: { $0.sessionID == fid }) {
-                // Focus mode: show only the triggered session.
-                sessionRow(focused)
-                if watcher.sessions.count > 1 {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            focusedSessionId = nil
-                            autoExpanded = false
-                        }
-                    } label: {
-                        Text("Show all \(watcher.sessions.count) sessions")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.white.opacity(0.45))
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 4)
-                    }
-                    .buttonStyle(.plain)
-                }
-            } else {
-                // Normal mode: show all sessions.
-                let visible = showAllSessions
-                    ? Array(watcher.sessions)
-                    : Array(watcher.sessions.prefix(defaultRowLimit))
+            ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(visible) { session in
-                        sessionRow(session)
+                    if watcher.sessions.isEmpty {
+                        Text("> no active sessions")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.4))
+                            .padding(.top, 4)
+                    } else if let fid = focusedSessionId,
+                              let focused = watcher.sessions.first(where: { $0.sessionID == fid }) {
+                        // Focus mode: show only the triggered session.
+                        sessionRow(focused)
+                        if watcher.sessions.count > 1 {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    focusedSessionId = nil
+                                    autoExpanded = false
+                                }
+                            } label: {
+                                Text("Show all \(watcher.sessions.count) sessions")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.45))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 4)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } else {
+                        // Normal mode: show all sessions.
+                        let visible = showAllSessions
+                            ? Array(watcher.sessions)
+                            : Array(watcher.sessions.prefix(defaultRowLimit))
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(visible) { session in
+                                sessionRow(session)
+                            }
+                        }
+                        if watcher.sessions.count > defaultRowLimit && !showAllSessions {
+                            showAllButton
+                        }
                     }
-                }
-                if watcher.sessions.count > defaultRowLimit && !showAllSessions {
-                    showAllButton
                 }
             }
             Spacer(minLength: 0)
@@ -333,19 +337,15 @@ struct NotchView: View {
                 PixelAvatar(status: session.status)
                     .padding(.top, 2)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(sessionTitle(session))
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 13, weight: .bold))
                             .foregroundColor(.white)
                             .lineLimit(1)
-                            .truncationMode(.tail)
+                            .truncationMode(.middle)
 
-                        if let branch = session.gitBranch, !branch.isEmpty {
-                            branchBadge(branch)
-                        }
-
-                        Spacer(minLength: 8)
+                        Spacer(minLength: 6)
 
                         badge("Claude")
                         if let tokenText = formatTokens(session.usage?.contextTokens) {
@@ -367,6 +367,10 @@ struct NotchView: View {
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                         }
+                    }
+
+                    if !session.todos.isEmpty {
+                        tasksList(session.todos)
                     }
 
                     if !session.subagents.isEmpty {
@@ -392,6 +396,59 @@ struct NotchView: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             hoveredSessionID = hovering ? session.id : nil
+        }
+    }
+
+    /// Tasks section matching Vibe Island: "Tasks (N done, N in progress, N open)"
+    /// Shows first 2 items + "... +N completed" truncation.
+    private func tasksList(_ todos: [TodoItem]) -> some View {
+        let done = todos.filter { $0.status == .completed }.count
+        let inProgress = todos.filter { $0.status == .inProgress }.count
+        let pending = todos.filter { $0.status == .pending }.count
+
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Tasks (\(done) done, \(inProgress) in progress, \(pending) open)")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white.opacity(0.5))
+
+            // Show non-completed first, then up to 2 completed
+            let active = todos.filter { $0.status != .completed }
+            let completed = todos.filter { $0.status == .completed }
+            let visibleCompleted = Array(completed.prefix(2))
+            let hiddenCount = completed.count - visibleCompleted.count
+
+            ForEach(active) { todo in
+                taskRow(todo)
+            }
+            ForEach(visibleCompleted) { todo in
+                taskRow(todo)
+            }
+            if hiddenCount > 0 {
+                Text("... +\(hiddenCount) completed")
+                    .font(.system(size: 9))
+                    .foregroundColor(.white.opacity(0.35))
+                    .padding(.leading, 20)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+    }
+
+    private func taskRow(_ todo: TodoItem) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: todo.status == .completed ? "checkmark.square.fill" : "square")
+                .font(.system(size: 10))
+                .foregroundColor(todo.status == .completed ? .green.opacity(0.6) : .white.opacity(0.3))
+            Text(todo.content)
+                .font(.system(size: 10))
+                .foregroundColor(todo.status == .completed ? .white.opacity(0.35) : .white.opacity(0.7))
+                .strikethrough(todo.status == .completed, color: .white.opacity(0.2))
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 
@@ -533,30 +590,30 @@ struct NotchView: View {
     /// with "Done" label, assistant response below. Matches Vibe Island's
     /// auto-expand-on-completion card.
     private func conversationCard(for session: ClaudeSession) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 if let userMsg = session.lastUserMessage, !userMsg.isEmpty {
                     Text("You:  " + userMsg)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.75))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.8))
                         .lineLimit(1)
                 }
                 Spacer()
                 Text("Done")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white.opacity(0.5))
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.green.opacity(0.7))
             }
 
             if let full = session.assistantFull, !full.isEmpty {
                 Text(full)
                     .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.55))
-                    .lineLimit(4)
+                    .foregroundColor(.white.opacity(0.6))
+                    .lineLimit(5)
                     .truncationMode(.tail)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -569,45 +626,55 @@ struct NotchView: View {
     }
 
     /// Full permission card matching Vibe Island's layout:
-    /// ⚠ Bash label → dark code box with $ command + description → 4 buttons
+    /// ⚠ Tool label → diff preview (Edit/Write) or command box → 4 buttons
     private func permissionCard(for session: ClaudeSession) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // ⚠ Bash label
             if let tool = session.currentTool {
+                // ⚠ Tool label
                 HStack(spacing: 4) {
                     Text("⚠")
                         .foregroundColor(.orange)
                     Text(tool.name)
                         .foregroundColor(.orange)
                         .fontWeight(.bold)
+                    if let diff = tool.diffPreview {
+                        Spacer()
+                        Text((diff.filePath as NSString).lastPathComponent)
+                            .foregroundColor(.white.opacity(0.5))
+                    }
                 }
                 .font(.system(size: 11, design: .monospaced))
 
-                // Dark code box
-                VStack(alignment: .leading, spacing: 4) {
-                    if let detail = tool.detail, !detail.isEmpty {
-                        Text("$ " + detail)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.85))
-                            .lineLimit(2)
+                // Diff preview for Edit/Write, or simple code box for others
+                if let diff = tool.diffPreview {
+                    diffPreviewView(diff)
+                } else {
+                    // Simple code box (Bash commands, etc.)
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let detail = tool.detail, !detail.isEmpty {
+                            Text("$ " + detail)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.85))
+                                .lineLimit(2)
+                        }
+                        if let desc = tool.description, !desc.isEmpty {
+                            Text(desc)
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.45))
+                                .lineLimit(1)
+                        }
                     }
-                    if let desc = tool.description, !desc.isEmpty {
-                        Text(desc)
-                            .font(.system(size: 10))
-                            .foregroundColor(.white.opacity(0.45))
-                            .lineLimit(1)
-                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
-                )
             }
 
-            // 4 buttons: Deny / Allow Once / Always Allow / Bypass
+            // Permission buttons: Deny / Allow Once / Bypass
             HStack(spacing: 6) {
                 permButton("Deny",
                            bg: Color.white.opacity(0.08),
@@ -619,11 +686,6 @@ struct NotchView: View {
                            fg: .white.opacity(0.9),
                            decision: "allow",
                            sessionId: session.sessionID)
-                permButton("Always Allow",
-                           bg: Color.blue.opacity(0.75),
-                           fg: .white,
-                           decision: "allow",
-                           sessionId: session.sessionID)
                 permButton("Bypass",
                            bg: Color.red.opacity(0.55),
                            fg: .white,
@@ -631,6 +693,79 @@ struct NotchView: View {
                            sessionId: session.sessionID)
             }
         }
+    }
+
+    // MARK: - Diff preview
+
+    /// Code diff view for Edit/Write tools — shows removed lines in red
+    /// and added lines in green, similar to Vibe Island's permission card.
+    private func diffPreviewView(_ diff: DiffPreview) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let old = diff.oldString {
+                let lines = old.components(separatedBy: "\n")
+                ForEach(0..<min(lines.count, 8), id: \.self) { i in
+                    diffLine(text: lines[i], isAddition: false)
+                }
+            }
+            if let new = diff.newString {
+                let lines = new.components(separatedBy: "\n")
+                ForEach(0..<min(lines.count, 8), id: \.self) { i in
+                    diffLine(text: lines[i], isAddition: true)
+                }
+            }
+            if let content = diff.content {
+                let lines = content.components(separatedBy: "\n")
+                ForEach(0..<min(lines.count, 10), id: \.self) { i in
+                    writeContentLine(text: lines[i], lineNumber: i + 1)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(white: 0.08))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    /// Single diff line: red background for removals, green for additions.
+    private func diffLine(text: String, isAddition: Bool) -> some View {
+        HStack(spacing: 0) {
+            Text(isAddition ? "+" : "-")
+                .frame(width: 16, alignment: .center)
+                .foregroundColor(isAddition ? .green : .red)
+            Text(" ")
+            Text(text)
+                .foregroundColor(.white.opacity(0.8))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isAddition
+            ? Color.green.opacity(0.1)
+            : Color.red.opacity(0.1))
+    }
+
+    /// Single line for Write tool content preview with line number.
+    private func writeContentLine(text: String, lineNumber: Int) -> some View {
+        HStack(spacing: 0) {
+            Text("\(lineNumber)")
+                .frame(width: 24, alignment: .trailing)
+                .foregroundColor(.white.opacity(0.25))
+            Text("  ")
+            Text(text)
+                .foregroundColor(.white.opacity(0.7))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.green.opacity(0.06))
     }
 
     private func permButton(
@@ -657,15 +792,23 @@ struct NotchView: View {
         .buttonStyle(.plain)
     }
 
-    /// Compose "ProjectName · session-slug" using the jsonl's slug field when
-    /// available, otherwise fall back to just the project name.
+    /// Compose "ProjectName · branch" using cwd for accurate project name
+    /// (avoids the dash-encoding problem in directory names like
+    /// "NumeroAssistant-AI" which would otherwise split into subfolders).
     private func sessionTitle(_ session: ClaudeSession) -> String {
-        // Drop the "~/" prefix from the decoded project name for compactness.
-        let name = session.projectName.hasPrefix("~/")
-            ? String(session.projectName.dropFirst(2))
-            : session.projectName
-        // Keep just the trailing path component as the project label.
-        let label = name.split(separator: "/").last.map(String.init) ?? name
+        let label: String
+        if let cwd = session.cwd {
+            label = (cwd as NSString).lastPathComponent
+        } else {
+            let name = session.projectName.hasPrefix("~/")
+                ? String(session.projectName.dropFirst(2))
+                : session.projectName
+            label = name.split(separator: "/").last.map(String.init) ?? name
+        }
+
+        if let branch = session.gitBranch, !branch.isEmpty {
+            return "\(label) · \(branch)"
+        }
         return label
     }
 

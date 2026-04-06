@@ -47,11 +47,14 @@ enum SessionLauncher {
         for rawLine in psOutput.split(separator: "\n") {
             guard let (pid, tty, command) = parsePsLine(String(rawLine)) else { continue }
 
-            // Only the interactive `claude` CLI — its command line starts with
-            // bare "claude" (invoked from $PATH). Filters out VSCode's bundled
-            // claude binary (has full path prefix) and `claude-browser-agent`
-            // node helpers.
-            guard command == "claude" || command.hasPrefix("claude ") else { continue }
+            // Match the interactive `claude` CLI. In practice it appears as
+            // `node /path/to/.npm-global/bin/claude` so we check if the
+            // command contains "/bin/claude" but NOT "browser-agent" or
+            // "ClaudeNotch" or "vibe-island".
+            let isClaudeCLI = (command == "claude" || command.hasPrefix("claude "))
+                || (command.contains("/bin/claude") && !command.contains("browser-agent")
+                    && !command.contains("ClaudeNotch") && !command.contains("vibe-island"))
+            guard isClaudeCLI else { continue }
             guard tty != "?" && tty != "??" else { continue }
 
             if let pidCwd = cwdOfProcess(pid: pid) {

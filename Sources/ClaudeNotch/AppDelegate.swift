@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchAtLoginMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ignore SIGPIPE so writing to a closed bridge socket doesn't
+        // crash the app. Common for daemon/background apps using sockets.
+        signal(SIGPIPE, SIG_IGN)
+
         let watcher = ClaudeWatcher()
         self.watcher = watcher
 
@@ -43,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
                 usage?.refreshIfStale(maxAge: 30)
+                // If user approved in terminal, clear the stale pending fd
+                // so the permission card disappears from the UI.
+                if let sid = event.sessionId {
+                    (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid)
+                }
             }
         }
         server.start()
