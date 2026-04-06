@@ -442,16 +442,16 @@ final class ClaudeWatcher: ObservableObject {
     }
 
     private func postNotification(title: String, body: String, sound: Bool) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        if sound { content.sound = .default }
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request) { _ in }
+        // UNUserNotificationCenter can silently fail for LSUIElement apps
+        // that haven't been granted permission. Fall back to osascript
+        // which is proven to work on this system.
+        let soundClause = sound ? " sound name \"Hero\"" : ""
+        let escaped = body.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "display notification \"\(escaped)\" with title \"\(title)\"\(soundClause)"
+        let task = Process()
+        task.launchPath = "/usr/bin/osascript"
+        task.arguments = ["-e", script]
+        try? task.run()
     }
 
     private static func modDate(_ url: URL) -> Date {
