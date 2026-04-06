@@ -369,6 +369,10 @@ struct NotchView: View {
                         }
                     }
 
+                    if !session.subagents.isEmpty {
+                        subagentTree(session.subagents)
+                    }
+
                     if let tool = session.currentTool {
                         toolBadge(tool)
                     }
@@ -389,6 +393,78 @@ struct NotchView: View {
         .onHover { hovering in
             hoveredSessionID = hovering ? session.id : nil
         }
+    }
+
+    /// Collapsible subagent tree: "⎇ Subagents (N)" header followed by
+    /// each subagent as a row with status dot, type, description, and
+    /// running duration.
+    private func subagentTree(_ subagents: [Subagent]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Header
+            HStack(spacing: 4) {
+                Text("⎇")
+                    .foregroundColor(.white.opacity(0.5))
+                Text("Subagents (\(subagents.count))")
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .font(.system(size: 10, weight: .medium))
+
+            // Each subagent
+            ForEach(subagents) { sub in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(sub.status == .running ? Color.blue : Color.green)
+                        .frame(width: 5, height: 5)
+                    Text(sub.agentType)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                    if let desc = sub.description {
+                        Text("(\(desc))")
+                            .font(.system(size: 9))
+                            .foregroundColor(.white.opacity(0.5))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer()
+                    Text(formatDuration(sub.duration))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.45))
+                    if sub.status == .done {
+                        Text("Done")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.green.opacity(0.7))
+                    }
+                }
+                // Show current tool of subagent if available
+                if let tool = sub.currentTool {
+                    HStack(spacing: 4) {
+                        Text("└")
+                            .foregroundColor(.white.opacity(0.25))
+                        Text("$")
+                            .foregroundColor(.white.opacity(0.35))
+                        Text(tool.detail ?? tool.name)
+                            .foregroundColor(.white.opacity(0.5))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                    .padding(.leading, 11)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+    }
+
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m\(s % 60)s" }
+        return "\(s / 3600)h\(s / 60 % 60)m"
     }
 
     /// Inline tool badge like "Bash git show 3864d21 …" shown while Claude

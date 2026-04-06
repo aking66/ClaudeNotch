@@ -32,6 +32,22 @@ struct CurrentTool: Hashable {
     let description: String?  // human description from tool_input.description
 }
 
+/// A subagent spawned by the Agent tool within a parent session.
+struct Subagent: Identifiable, Hashable {
+    let id: String            // unique subagent id from the hook payload
+    let agentType: String     // e.g. "general-purpose", "Explore", "Plan"
+    let description: String?  // task description
+    let startedAt: Date
+    var status: SubagentStatus
+    var currentTool: CurrentTool?  // what the subagent is currently doing
+    var duration: TimeInterval { Date().timeIntervalSince(startedAt) }
+}
+
+enum SubagentStatus: String, Hashable {
+    case running = "Running"
+    case done = "Done"
+}
+
 /// A single active Claude Code session discovered on disk.
 struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
@@ -45,6 +61,7 @@ struct ClaudeSession: Identifiable, Hashable {
     let usage: UsageStats?          // Cumulative token usage + cost
     let gitBranch: String?          // Current git branch from the jsonl
     let currentTool: CurrentTool?   // Tool currently in flight (hook-driven)
+    let subagents: [Subagent]       // Active/completed subagents (hook-driven)
 
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
@@ -61,7 +78,7 @@ struct ClaudeSession: Identifiable, Hashable {
                       lastSnippet: lastSnippet, assistantFull: assistantFull,
                       lastUserMessage: lastUserMessage, status: newStatus,
                       cwd: cwd, usage: usage, gitBranch: gitBranch,
-                      currentTool: currentTool)
+                      currentTool: currentTool, subagents: subagents)
     }
 
     func with(currentTool newTool: CurrentTool?) -> ClaudeSession {
@@ -69,7 +86,15 @@ struct ClaudeSession: Identifiable, Hashable {
                       lastSnippet: lastSnippet, assistantFull: assistantFull,
                       lastUserMessage: lastUserMessage, status: status,
                       cwd: cwd, usage: usage, gitBranch: gitBranch,
-                      currentTool: newTool)
+                      currentTool: newTool, subagents: subagents)
+    }
+
+    func with(subagents newSubagents: [Subagent]) -> ClaudeSession {
+        ClaudeSession(id: id, projectName: projectName, lastModified: lastModified,
+                      lastSnippet: lastSnippet, assistantFull: assistantFull,
+                      lastUserMessage: lastUserMessage, status: status,
+                      cwd: cwd, usage: usage, gitBranch: gitBranch,
+                      currentTool: currentTool, subagents: newSubagents)
     }
 }
 
@@ -105,6 +130,9 @@ final class ClaudeWatcher: ObservableObject {
     /// Current in-flight tool per session UUID, populated from
     /// `PreToolUse` hook events and cleared on `PostToolUse`.
     private var currentTools: [String: CurrentTool] = [:]
+
+    /// Active subagents per parent session UUID.
+    private var sessionSubagents: [String: [Subagent]] = [:]
 
     /// Session-status overrides driven by Claude Code hook events.
     /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
@@ -225,7 +253,8 @@ final class ClaudeWatcher: ObservableObject {
                     cwd: tail.cwd,
                     usage: usage,
                     gitBranch: tail.branch,
-                    currentTool: nil
+                    currentTool: nil,
+                    subagents: []
                 ))
             }
         }
@@ -242,6 +271,7 @@ final class ClaudeWatcher: ObservableObject {
         lastStatus = lastStatus.filter { activeIDs.contains($0.key) }
         hookStatus = hookStatus.filter { activeSessionIDs.contains($0.key) }
         currentTools = currentTools.filter { activeSessionIDs.contains($0.key) }
+        sessionSubagents = sessionSubagents.filter { activeSessionIDs.contains($0.key) }
     }
 
     // MARK: - Hook-driven updates
@@ -270,6 +300,43 @@ final class ClaudeWatcher: ObservableObject {
             }
         case "PostToolUse", "Stop", "SessionEnd":
             currentTools[sid] = nil
+        default:
+            break
+        }
+
+        // Track subagents spawned within each session.
+        switch event.hookEventName {
+        case "SubagentStart":
+            let subId = event.raw["subagent_id"] as? String ?? UUID().uuidString
+            let agentType = event.raw["subagent_type"] as? String
+                ?? event.toolInput?["subagent_type"] as? String
+                ?? "agent"
+            let desc = event.raw["description"] as? String
+                ?? event.toolInput?["description"] as? String
+            let sub = Subagent(
+                id: subId,
+                agentType: agentType,
+                description: desc,
+                startedAt: Date(),
+                status: .running,
+                currentTool: nil
+            )
+            var subs = sessionSubagents[sid] ?? []
+            subs.append(sub)
+            sessionSubagents[sid] = subs
+
+        case "SubagentStop":
+            let subId = event.raw["subagent_id"] as? String ?? ""
+            if var subs = sessionSubagents[sid] {
+                if let idx = subs.firstIndex(where: { $0.id == subId }) {
+                    subs[idx].status = .done
+                    sessionSubagents[sid] = subs
+                }
+            }
+
+        case "SessionEnd":
+            sessionSubagents[sid] = nil
+
         default:
             break
         }
@@ -380,6 +447,9 @@ final class ClaudeWatcher: ObservableObject {
             }
             if let tool = currentTools[session.sessionID] {
                 result = result.with(currentTool: tool)
+            }
+            if let subs = sessionSubagents[session.sessionID], !subs.isEmpty {
+                result = result.with(subagents: subs)
             }
             return result
         }
