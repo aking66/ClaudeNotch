@@ -280,29 +280,33 @@ final class ClaudeWatcher: ObservableObject {
                 }
                 lastStatus[latest] = status
 
-                // Expensive full-file scan for usage — cache by mtime so we
-                // only re-parse when the file actually changed.
-                let usage: UsageStats?
-                if let cached = usageCache[latest], cached.mtime == mod {
-                    usage = cached.stats
-                } else {
-                    usage = Self.parseUsage(latest)
-                    if let u = usage {
-                        usageCache[latest] = (mod, u)
+                // Use cached values for expensive full-file scans.
+                // When cache is stale, serve stale data and refresh async.
+                let usage: UsageStats? = usageCache[latest]?.stats
+                let fileTasks: [TodoItem] = taskCache[latest]?.tasks ?? []
+
+                // Schedule background refresh for stale caches.
+                let needsUsageRefresh = usageCache[latest]?.mtime != mod
+                let needsTaskRefresh = taskCache[latest]?.mtime != mod
+                if needsUsageRefresh || needsTaskRefresh {
+                    let url = latest
+                    let mtime = mod
+                    DispatchQueue.global(qos: .utility).async {
+                        let newUsage = needsUsageRefresh ? Self.parseUsage(url) : nil
+                        let newTasks = needsTaskRefresh ? Self.parseTasks(url) : nil
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            if needsUsageRefresh, let u = newUsage {
+                                self.usageCache[url] = (mtime, u)
+                            }
+                            if needsTaskRefresh {
+                                self.taskCache[url] = (mtime, newTasks ?? [])
+                            }
+                            self.rebuildPublishedSessions()
+                        }
                     }
                 }
 
-                // Full-file scan for tasks (TaskCreate/TaskUpdate/TodoWrite) — cached.
-                let fileTasks: [TodoItem]
-                if let cached = taskCache[latest], cached.mtime == mod {
-                    fileTasks = cached.tasks
-                } else {
-                    fileTasks = Self.parseTasks(latest)
-                    taskCache[latest] = (mod, fileTasks)
-                }
-
-                // Merge: prefer tail TodoWrite (most recent snapshot), then
-                // fall back to full-file TaskCreate/TaskUpdate scan.
                 let todos = tail.todos.isEmpty ? fileTasks : tail.todos
 
                 found.append(ClaudeSession(
@@ -366,8 +370,10 @@ final class ClaudeWatcher: ObservableObject {
                     diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput)
                 )
             }
-        case "PostToolUse", "Stop", "SessionEnd":
-            currentTools[sid] = nil
+        case "PostToolUse":
+            break  // Keep showing last tool
+        case "Stop", "SessionEnd":
+            break  // Keep showing last tool even when idle
         default:
             break
         }

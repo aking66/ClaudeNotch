@@ -49,14 +49,29 @@ struct NotchView: View {
                     .padding(.bottom, isExpanded ? 14 : 8)
             }
             .frame(width: currentWidth, height: currentHeight)
+            .overlay(alignment: .top) {
+                if isExpanded {
+                    HStack {
+                        InverseCorner(radius: 16)
+                            .fill(Color.black)
+                            .frame(width: 16, height: 16)
+                            .offset(x: -16, y: 0)
+                        Spacer()
+                        InverseCorner(radius: 16)
+                            .fill(Color.black)
+                            .frame(width: 16, height: 16)
+                            .scaleEffect(x: -1)
+                            .offset(x: 16, y: 0)
+                    }
+                    .transition(.opacity)
+                }
+            }
             .contentShape(shape)
             .onHover { hovering in
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                     if hovering {
                         isExpanded = true
                     } else if !autoExpanded {
-                        // Don't collapse if the panel was auto-expanded by
-                        // an event — let it stay until mouse enters + leaves.
                         isExpanded = false
                     }
                 }
@@ -110,21 +125,33 @@ struct NotchView: View {
     }
 
     private var collapsedContent: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            // Session avatars on the left
             HStack(spacing: 6) {
                 ForEach(watcher.sessions.prefix(4)) { session in
                     PixelAvatar(status: session.status)
                 }
             }
             Spacer(minLength: 4)
-            if watcher.sessions.isEmpty {
-                Text("◆ CLAUDE NOTCH")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(.cyan.opacity(0.55))
-            } else {
+            // Usage pill: "✦ 5h 3%" or session count
+            if let limit = usage.utilization?.five_hour {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.orange)
+                Text("5h")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+                Text(Self.formatPercent(limit.utilization))
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(Self.colorForUtilization(limit.utilization))
+            } else if !watcher.sessions.isEmpty {
                 Text("\(watcher.sessions.count)")
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundColor(.cyan)
+            } else {
+                Text("◆ CLAUDE NOTCH")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(.cyan.opacity(0.55))
             }
         }
         .transition(.opacity)
@@ -547,26 +574,15 @@ struct NotchView: View {
     /// and risky tools stand out from plain Read/Grep.
     private func toolBadge(_ tool: CurrentTool) -> some View {
         HStack(spacing: 4) {
-            // For file tools, show just the filename like Vibe Island.
-            // For Bash/other, show tool name + detail.
-            let isFileTool = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"].contains(tool.name)
-            if isFileTool, let detail = tool.detail, !detail.isEmpty {
+            Text(tool.name)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(Self.tintForTool(tool.name))
+            if let detail = tool.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.middle)
-            } else {
-                Text(tool.name)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(Self.tintForTool(tool.name))
-                if let detail = tool.detail, !detail.isEmpty {
-                    Text(detail)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.55))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
             }
         }
     }
@@ -635,38 +651,36 @@ struct NotchView: View {
     /// with "Done" label, assistant response below. Matches Vibe Island's
     /// auto-expand-on-completion card.
     private func conversationCard(for session: ClaudeSession) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                if let userMsg = session.lastUserMessage, !userMsg.isEmpty {
-                    Text("You:  " + userMsg)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.8))
-                        .lineLimit(1)
-                }
-                Spacer()
-                Text("Done")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.green.opacity(0.7))
-            }
-
+        VStack(alignment: .leading, spacing: 4) {
             if let full = session.assistantFull, !full.isEmpty {
+                HStack {
+                    Spacer()
+                    Text("Done")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.green.opacity(0.7))
+                }
                 Text(full)
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.6))
-                    .lineLimit(5)
+                    .lineLimit(3)
                     .truncationMode(.tail)
+            } else {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 5, height: 5)
+                    Text("Done")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.green.opacity(0.7))
+                }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.white.opacity(0.04))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-                )
         )
     }
 
@@ -888,10 +902,7 @@ struct NotchView: View {
     private var background: some View {
         shape
             .fill(Color.black)
-            .overlay(
-                shape.stroke(Color.cyan.opacity(isExpanded ? 0.35 : 0.2), lineWidth: 1)
-            )
-            .shadow(color: .cyan.opacity(isExpanded ? 0.18 : 0.1), radius: isExpanded ? 24 : 12, y: 6)
+            .shadow(color: .black.opacity(0.3), radius: isExpanded ? 12 : 4, y: 3)
     }
 
     // MARK: - Formatting helpers
@@ -1001,5 +1012,29 @@ struct PixelAvatar: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - InverseCorner
+
+/// Draws a concave (inverse) quarter-circle used at the top edges of the
+/// expanded panel to create a smooth connection with the notch cutout.
+/// Inverse (concave) quarter-circle corner. Fills the area between a square
+/// and a quarter-circle arc, creating the "ear" shape seen at the top edges
+/// of notch-style panels (like Vibe Island / NotchNook).
+struct InverseCorner: Shape {
+    let radius: CGFloat
+    func path(in rect: CGRect) -> Path {
+        let r = min(radius, min(rect.width, rect.height))
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: r, y: r))
+        p.addLine(to: CGPoint(x: 0, y: r))
+        // Concave arc from (0, r) curving inward to (r, 0).
+        p.addArc(center: .zero, radius: r,
+                 startAngle: .degrees(90), endAngle: .degrees(0),
+                 clockwise: true)
+        p.closeSubpath()
+        return p
     }
 }
