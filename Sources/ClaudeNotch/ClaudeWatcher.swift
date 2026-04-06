@@ -8,10 +8,12 @@ import UserNotifications
 /// the user to click Allow on a tool request" from "Claude is done".
 enum SessionStatus: String, Hashable {
     case working           // streaming, running a tool, or user just spoke
+    case compacting        // context compaction in progress
     case awaitingApproval  // tool_use pending with no recent file activity
+    case interrupted       // session was terminated/cancelled mid-turn
     case idle              // last assistant message hit a terminal stop_reason
 
-    var isBusy: Bool { self != .idle }
+    var isBusy: Bool { self != .idle && self != .interrupted }
 }
 
 /// Token usage snapshot for a session. `contextTokens` mirrors what the
@@ -151,6 +153,9 @@ final class ClaudeWatcher: ObservableObject {
     /// file mtime at parse time so we can invalidate cheaply.
     private var usageCache: [URL: (mtime: Date, stats: UsageStats)] = [:]
 
+    /// Cache parsed tasks per session file (full-file scan, like usage).
+    private var taskCache: [URL: (mtime: Date, tasks: [TodoItem])] = [:]
+
     /// Previous status per session, used to detect transitions and fire
     /// notifications / avoid flicker from transient parse failures.
     private var lastStatus: [URL: SessionStatus] = [:]
@@ -167,8 +172,12 @@ final class ClaudeWatcher: ObservableObject {
     /// Active subagents per parent session UUID.
     private var sessionSubagents: [String: [Subagent]] = [:]
 
-    /// Tasks per session UUID, populated from TodoWrite tool events.
+    /// Tasks per session UUID, populated from TodoWrite/TaskCreate/TaskUpdate events.
     private var sessionTodos: [String: [TodoItem]] = [:]
+
+    /// Counter for TaskCreate per session, so we can assign numeric IDs
+    /// that match what TaskUpdate references.
+    private var taskCounter: [String: Int] = [:]
 
     /// Pending subagent type/description from Agent PreToolUse, used when
     /// SubagentStart doesn't carry these fields directly.
@@ -283,6 +292,19 @@ final class ClaudeWatcher: ObservableObject {
                     }
                 }
 
+                // Full-file scan for tasks (TaskCreate/TaskUpdate/TodoWrite) — cached.
+                let fileTasks: [TodoItem]
+                if let cached = taskCache[latest], cached.mtime == mod {
+                    fileTasks = cached.tasks
+                } else {
+                    fileTasks = Self.parseTasks(latest)
+                    taskCache[latest] = (mod, fileTasks)
+                }
+
+                // Merge: prefer tail TodoWrite (most recent snapshot), then
+                // fall back to full-file TaskCreate/TaskUpdate scan.
+                let todos = tail.todos.isEmpty ? fileTasks : tail.todos
+
                 found.append(ClaudeSession(
                     id: latest,
                     projectName: Self.decodeProjectName(dir.lastPathComponent),
@@ -296,7 +318,7 @@ final class ClaudeWatcher: ObservableObject {
                     gitBranch: tail.branch,
                     currentTool: nil,
                     subagents: [],
-                    todos: tail.todos
+                    todos: todos
                 ))
             }
         }
@@ -310,11 +332,13 @@ final class ClaudeWatcher: ObservableObject {
         let activeIDs = Set(found.map { $0.id })
         let activeSessionIDs = Set(found.map { $0.sessionID })
         usageCache = usageCache.filter { activeIDs.contains($0.key) }
+        taskCache = taskCache.filter { activeIDs.contains($0.key) }
         lastStatus = lastStatus.filter { activeIDs.contains($0.key) }
         hookStatus = hookStatus.filter { activeSessionIDs.contains($0.key) }
         currentTools = currentTools.filter { activeSessionIDs.contains($0.key) }
         sessionSubagents = sessionSubagents.filter { activeSessionIDs.contains($0.key) }
         sessionTodos = sessionTodos.filter { activeSessionIDs.contains($0.key) }
+        taskCounter = taskCounter.filter { activeSessionIDs.contains($0.key) }
     }
 
     // MARK: - Hook-driven updates
@@ -422,30 +446,44 @@ final class ClaudeWatcher: ObservableObject {
             sessionSubagents[sid] = subs
         }
 
-        // Track TodoWrite tool events to populate the tasks section.
-        if (event.hookEventName == "PostToolUse" || event.hookEventName == "PreToolUse"),
-           event.toolName == "TodoWrite" || event.toolName == "TodoWriteTool",
-           let input = event.toolInput,
-           let todosRaw = input["todos"] as? [[String: Any]] {
-            let todos = todosRaw.compactMap { obj -> TodoItem? in
-                guard let content = obj["content"] as? String,
-                      let statusStr = obj["status"] as? String else { return nil }
-                let status: TodoStatus
-                switch statusStr {
-                case "completed": status = .completed
-                case "in_progress": status = .inProgress
-                default: status = .pending
+        // Track task tools to populate the tasks section.
+        // Supports both TodoWrite (full list) and TaskCreate/TaskUpdate (incremental).
+        if event.hookEventName == "PostToolUse" || event.hookEventName == "PreToolUse" {
+            let name = event.toolName ?? ""
+            let input = event.toolInput ?? [:]
+
+            if name == "TodoWrite" || name == "TodoWriteTool",
+               let todosRaw = input["todos"] as? [[String: Any]] {
+                let todos = todosRaw.compactMap { obj -> TodoItem? in
+                    guard let content = obj["content"] as? String,
+                          let statusStr = obj["status"] as? String else { return nil }
+                    let status: TodoStatus
+                    switch statusStr {
+                    case "completed": status = .completed
+                    case "in_progress": status = .inProgress
+                    default: status = .pending
+                    }
+                    return TodoItem(id: content, content: content, status: status)
                 }
-                return TodoItem(id: content, content: content, status: status)
+                if !todos.isEmpty { sessionTodos[sid] = todos }
             }
-            if !todos.isEmpty {
-                sessionTodos[sid] = todos
+
+            // TaskCreate/TaskUpdate: invalidate the task cache so the next
+            // refresh picks up the change from the jsonl (full-file scan).
+            // We don't track these via hooks because the numeric IDs assigned
+            // by Claude Code aren't available in the hook payload.
+            if name == "TaskCreate" || name == "TaskUpdate" {
+                // Find the session URL to invalidate its task cache.
+                if let url = baseSessions.values.first(where: { $0.sessionID == sid })?.id {
+                    taskCache.removeValue(forKey: url)
+                }
             }
         }
 
         // Clear todos on session end.
         if event.hookEventName == "SessionEnd" {
             sessionTodos[sid] = nil
+            taskCounter[sid] = nil
         }
 
         // PermissionRequest also carries tool_input — update currentTools
@@ -553,21 +591,12 @@ final class ClaudeWatcher: ObservableObject {
         case "UserPromptSubmit", "PreToolUse":
             return .working
         case "PostToolUse":
-            // Tool finished (whether auto-approved or user-approved) — the
-            // session is no longer blocked on a permission prompt. Claude
-            // is still mid-turn; a Stop will arrive when it truly finishes.
             return .working
         case "PermissionRequest":
-            // The authoritative signal for "stuck waiting on the user".
             return .awaitingApproval
         case "Stop", "SessionEnd":
             return .idle
         default:
-            // Notification and other events are deliberately ignored: they
-            // can fire for idle timeouts, session ends, generic attention
-            // requests, etc. and would cause false "awaiting approval"
-            // states. PermissionRequest is the only reliable approval
-            // signal; we rely on it alone.
             return nil
         }
     }
@@ -610,13 +639,9 @@ final class ClaudeWatcher: ObservableObject {
     ) -> SessionStatus {
         switch tail.lastEntryKind {
         case .assistantStreaming:
-            // Assistant entry exists but stop_reason is still null → mid-stream.
             return .working
 
         case .assistantToolUse:
-            // Claude requested a tool. If the file has been quiet for more
-            // than a couple seconds, the harness is stuck on a permission
-            // prompt waiting for the user. Otherwise the tool is running.
             let idleFor = now.timeIntervalSince(fileModifiedAt)
             return idleFor > approvalIdleThreshold ? .awaitingApproval : .working
 
@@ -624,8 +649,12 @@ final class ClaudeWatcher: ObservableObject {
             return .idle
 
         case .userMessage:
-            // User just spoke (input or tool_result). Claude will respond.
             return .working
+
+        case .compactBoundary:
+            // Compact just started — file is being rewritten.
+            let idleFor = now.timeIntervalSince(fileModifiedAt)
+            return idleFor < 60 ? .compacting : .idle
 
         case .unknown:
             return .idle
@@ -679,6 +708,7 @@ final class ClaudeWatcher: ObservableObject {
         case assistantToolUse    // assistant message with stop_reason == "tool_use"
         case assistantEndTurn    // assistant message with a terminal stop_reason
         case userMessage         // user prompt or tool_result
+        case compactBoundary     // system compact_boundary entry
         case unknown             // parse failed or nothing matched
     }
 
@@ -703,7 +733,7 @@ final class ClaudeWatcher: ObservableObject {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return empty }
         defer { try? handle.close() }
 
-        let chunkSize: UInt64 = 524_288  // 512 KB
+        let chunkSize: UInt64 = 2_097_152  // 2 MB — large enough to find TaskCreate entries
         let fileSize = (try? handle.seekToEnd()) ?? 0
         let start = fileSize > chunkSize ? fileSize - chunkSize : 0
         try? handle.seek(toOffset: start)
@@ -791,7 +821,7 @@ final class ClaudeWatcher: ObservableObject {
                 }
             }
 
-            // Find the most recent TodoWrite tool_use to populate tasks.
+            // Find most recent TodoWrite (full list replacement).
             if !todosFound, entryType == "assistant",
                let msg = obj["message"] as? [String: Any],
                let contents = msg["content"] as? [[String: Any]] {
@@ -823,6 +853,47 @@ final class ClaudeWatcher: ObservableObject {
             if allFound { break }
         }
 
+        // If no TodoWrite found, try forward scan for TaskCreate/TaskUpdate (incremental).
+        if !todosFound {
+            var taskMap: [String: (content: String, status: TodoStatus)] = [:]
+            var nextId = 1
+            for line in lines {
+                guard let lineData = line.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                      (obj["type"] as? String) == "assistant",
+                      let msg = obj["message"] as? [String: Any],
+                      let contents = msg["content"] as? [[String: Any]]
+                else { continue }
+                for c in contents {
+                    guard (c["type"] as? String) == "tool_use",
+                          let name = c["name"] as? String,
+                          let input = c["input"] as? [String: Any] else { continue }
+                    if name == "TaskCreate", let subject = input["subject"] as? String {
+                        let id = "\(nextId)"
+                        taskMap[id] = (subject, .pending)
+                        nextId += 1
+                    }
+                    if name == "TaskUpdate",
+                       let taskId = input["taskId"] as? String,
+                       let statusStr = input["status"] as? String {
+                        if var existing = taskMap[taskId] {
+                            switch statusStr {
+                            case "completed": existing.status = .completed
+                            case "in_progress": existing.status = .inProgress
+                            case "deleted": taskMap.removeValue(forKey: taskId); continue
+                            default: existing.status = .pending
+                            }
+                            taskMap[taskId] = existing
+                        }
+                    }
+                }
+            }
+            if !taskMap.isEmpty {
+                todos = taskMap.sorted(by: { Int($0.key) ?? 0 < Int($1.key) ?? 0 })
+                    .map { TodoItem(id: $0.key, content: $0.value.content, status: $0.value.status) }
+            }
+        }
+
         return TailParseResult(
             snippet: snippet,
             assistantFull: assistantFull,
@@ -838,6 +909,10 @@ final class ClaudeWatcher: ObservableObject {
     /// explicit `stop_reason` field over content-type heuristics.
     private static func classifyEntry(_ obj: [String: Any]) -> LastEntryKind {
         guard let type = obj["type"] as? String else { return .unknown }
+
+        if type == "system", (obj["subtype"] as? String) == "compact_boundary" {
+            return .compactBoundary
+        }
 
         if type == "user" {
             return .userMessage
@@ -908,6 +983,120 @@ final class ClaudeWatcher: ObservableObject {
             contextTokens: latestContextTokens,
             outputTokens: cumulativeOutput
         )
+    }
+
+    /// Scan the full .jsonl for TaskCreate/TaskUpdate/TodoWrite to build
+    /// the current task list. Reads the entire file but only parses lines
+    /// containing task tool names (fast string filter before JSON parse).
+    private static func parseTasks(_ url: URL) -> [TodoItem] {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { return [] }
+
+        var taskMap: [String: (content: String, status: TodoStatus)] = [:]
+        var latestTodoWrite: [TodoItem]? = nil
+        // Map tool_use_id → subject for correlating TaskCreate with its tool_result.
+        var pendingCreates: [String: String] = [:]
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            // Fast pre-filter: skip lines that can't contain task tools.
+            let hasTask = line.contains("TaskCreate") || line.contains("TaskUpdate")
+                || line.contains("TodoWrite") || line.contains("Task #")
+            guard hasTask else { continue }
+
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+
+            let entryType = obj["type"] as? String
+            let msg = obj["message"] as? [String: Any]
+            let contents: [[String: Any]]?
+            if let c = msg?["content"] as? [[String: Any]] {
+                contents = c
+            } else {
+                contents = nil
+            }
+
+            // Assistant entries: tool_use calls for TaskCreate/TaskUpdate/TodoWrite
+            if entryType == "assistant", let contents {
+                for c in contents {
+                    guard (c["type"] as? String) == "tool_use",
+                          let name = c["name"] as? String,
+                          let input = c["input"] as? [String: Any] else { continue }
+
+                    if (name == "TodoWrite" || name == "TodoWriteTool"),
+                       let rawTodos = input["todos"] as? [[String: Any]] {
+                        latestTodoWrite = rawTodos.compactMap { t -> TodoItem? in
+                            guard let content = t["content"] as? String,
+                                  let st = t["status"] as? String else { return nil }
+                            let status: TodoStatus
+                            switch st {
+                            case "completed": status = .completed
+                            case "in_progress": status = .inProgress
+                            default: status = .pending
+                            }
+                            return TodoItem(id: content, content: content, status: status)
+                        }
+                    }
+
+                    if name == "TaskCreate", let subject = input["subject"] as? String,
+                       let toolUseId = c["id"] as? String {
+                        pendingCreates[toolUseId] = subject
+                    }
+
+                    if name == "TaskUpdate",
+                       let taskId = input["taskId"] as? String,
+                       let statusStr = input["status"] as? String {
+                        if var existing = taskMap[taskId] {
+                            switch statusStr {
+                            case "completed": existing.status = .completed
+                            case "in_progress": existing.status = .inProgress
+                            case "deleted": taskMap.removeValue(forKey: taskId); continue
+                            default: existing.status = .pending
+                            }
+                            taskMap[taskId] = existing
+                        }
+                    }
+                }
+            }
+
+            // User entries: tool_result containing "Task #N created successfully"
+            // to get the real numeric ID assigned by Claude Code.
+            if entryType == "user", let contents {
+                for c in contents {
+                    guard (c["type"] as? String) == "tool_result",
+                          let toolUseId = c["tool_use_id"] as? String,
+                          let subject = pendingCreates.removeValue(forKey: toolUseId)
+                    else { continue }
+                    // Content can be a string or array of text blocks.
+                    let resultText: String?
+                    if let s = c["content"] as? String {
+                        resultText = s
+                    } else if let blocks = c["content"] as? [[String: Any]] {
+                        resultText = blocks.compactMap { $0["text"] as? String }.first
+                    } else {
+                        resultText = nil
+                    }
+                    // Parse "Task #N created successfully" to extract N.
+                    if let text = resultText,
+                       let range = text.range(of: #"Task #(\d+)"#, options: .regularExpression) {
+                        let match = text[range]
+                        let numStr = match.drop(while: { !$0.isNumber })
+                        let taskId = String(numStr)
+                        taskMap[taskId] = (subject, .pending)
+                    }
+                }
+            }
+        }
+
+        // Prefer TodoWrite (full snapshot) over incremental TaskCreate/TaskUpdate.
+        if let todos = latestTodoWrite, !todos.isEmpty {
+            return todos
+        }
+
+        guard !taskMap.isEmpty else { return [] }
+        return taskMap.sorted(by: { Int($0.key) ?? 0 < Int($1.key) ?? 0 })
+            .map { TodoItem(id: $0.key, content: $0.value.content, status: $0.value.status) }
     }
 
     /// Claude Code encodes project paths by replacing "/" with "-".

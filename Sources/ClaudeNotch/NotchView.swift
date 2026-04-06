@@ -13,6 +13,7 @@ struct NotchView: View {
     @State private var showAllSessions = false
     @State private var autoExpanded = false
     @State private var focusedSessionId: String?
+    @State private var hiddenSessionIDs: Set<String> = []
 
     /// Rows visible before the user taps "Show all N sessions".
     private let defaultRowLimit = 3
@@ -159,16 +160,17 @@ struct NotchView: View {
                             .buttonStyle(.plain)
                         }
                     } else {
-                        // Normal mode: show all sessions.
+                        // Normal mode: show all sessions (minus hidden).
+                        let filtered = watcher.sessions.filter { !hiddenSessionIDs.contains($0.sessionID) }
                         let visible = showAllSessions
-                            ? Array(watcher.sessions)
-                            : Array(watcher.sessions.prefix(defaultRowLimit))
+                            ? Array(filtered)
+                            : Array(filtered.prefix(defaultRowLimit))
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(visible) { session in
                                 sessionRow(session)
                             }
                         }
-                        if watcher.sessions.count > defaultRowLimit && !showAllSessions {
+                        if filtered.count > defaultRowLimit && !showAllSessions {
                             showAllButton
                         }
                     }
@@ -330,72 +332,83 @@ struct NotchView: View {
 
     private func sessionRow(_ session: ClaudeSession) -> some View {
         let isHovered = hoveredSessionID == session.id
-        return Button {
-            SessionLauncher.open(session)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                PixelAvatar(status: session.status)
-                    .padding(.top, 2)
+        let bgColor: Color = isHovered ? Color.white.opacity(0.06) : Color.clear
+        return HStack(alignment: .top, spacing: 10) {
+            PixelAvatar(status: session.status)
+                .padding(.top, 2)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(sessionTitle(session))
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-
-                        Spacer(minLength: 6)
-
-                        badge("Claude")
-                        if let tokenText = formatTokens(session.usage?.contextTokens) {
-                            badge(tokenText, tint: .cyan)
-                        }
-                        Text(relativeTime(session.lastModified))
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.5))
-                    }
-
-                    if let snippet = session.lastSnippet, !snippet.isEmpty {
-                        HStack(spacing: 4) {
-                            Text("You:")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.white.opacity(0.6))
-                            Text(snippet)
-                                .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
-
-                    if !session.todos.isEmpty {
-                        tasksList(session.todos)
-                    }
-
-                    if !session.subagents.isEmpty {
-                        subagentTree(session.subagents)
-                    }
-
-                    if let tool = session.currentTool {
-                        toolBadge(tool)
-                    }
-
-                    statusLabel(for: session)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                sessionRowHeader(session)
+                sessionRowBody(session)
+                statusLabel(for: session)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(isHovered ? 0.06 : 0))
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            hoveredSessionID = hovering ? session.id : nil
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(bgColor))
+        .contentShape(Rectangle())
+        .onTapGesture { SessionLauncher.open(session) }
+        .onHover { hovering in hoveredSessionID = hovering ? session.id : nil }
+    }
+
+    /// Top line of a session row: title + badges + terminal button + archive.
+    private func sessionRowHeader(_ session: ClaudeSession) -> some View {
+        HStack(spacing: 5) {
+            Text(sessionTitle(session))
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 4)
+
+            badge("Claude")
+            Button { SessionLauncher.open(session) } label: { badge("Terminal") }
+                .buttonStyle(.plain)
+            if let tokenText = formatTokens(session.usage?.contextTokens) {
+                badge(tokenText, tint: .cyan)
+            }
+            Text(relativeTime(session.lastModified))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(.white.opacity(0.5))
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { _ = hiddenSessionIDs.insert(session.sessionID) }
+            } label: {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// Body of a session row: snippet, tasks, subagents, tool badge.
+    @ViewBuilder
+    private func sessionRowBody(_ session: ClaudeSession) -> some View {
+        if let userMsg = session.lastUserMessage, !userMsg.isEmpty {
+            HStack(spacing: 4) {
+                Text("You:")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.6))
+                Text(userMsg)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.5))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+
+        if let tool = session.currentTool {
+            toolBadge(tool)
+        }
+
+        if !session.subagents.isEmpty {
+            subagentTree(session.subagents)
+        }
+
+        if !session.todos.isEmpty {
+            tasksList(session.todos)
         }
     }
 
@@ -406,12 +419,16 @@ struct NotchView: View {
         let inProgress = todos.filter { $0.status == .inProgress }.count
         let pending = todos.filter { $0.status == .pending }.count
 
-        return VStack(alignment: .leading, spacing: 4) {
-            Text("Tasks (\(done) done, \(inProgress) in progress, \(pending) open)")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.white.opacity(0.5))
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 0) {
+                Text("Tasks")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white.opacity(0.7))
+                Text("  (\(done) done, \(inProgress) in progress, \(pending) open)")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.4))
+            }
 
-            // Show non-completed first, then up to 2 completed
             let active = todos.filter { $0.status != .completed }
             let completed = todos.filter { $0.status == .completed }
             let visibleCompleted = Array(completed.prefix(2))
@@ -426,14 +443,15 @@ struct NotchView: View {
             if hiddenCount > 0 {
                 Text("... +\(hiddenCount) completed")
                     .font(.system(size: 9))
-                    .foregroundColor(.white.opacity(0.35))
-                    .padding(.leading, 20)
+                    .foregroundColor(.white.opacity(0.3))
+                    .padding(.leading, 18)
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.white.opacity(0.03))
         )
     }
@@ -441,10 +459,10 @@ struct NotchView: View {
     private func taskRow(_ todo: TodoItem) -> some View {
         HStack(spacing: 6) {
             Image(systemName: todo.status == .completed ? "checkmark.square.fill" : "square")
-                .font(.system(size: 10))
-                .foregroundColor(todo.status == .completed ? .green.opacity(0.6) : .white.opacity(0.3))
+                .font(.system(size: 11))
+                .foregroundColor(todo.status == .completed ? .blue.opacity(0.6) : .white.opacity(0.3))
             Text(todo.content)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundColor(todo.status == .completed ? .white.opacity(0.35) : .white.opacity(0.7))
                 .strikethrough(todo.status == .completed, color: .white.opacity(0.2))
                 .lineLimit(1)
@@ -529,15 +547,26 @@ struct NotchView: View {
     /// and risky tools stand out from plain Read/Grep.
     private func toolBadge(_ tool: CurrentTool) -> some View {
         HStack(spacing: 4) {
-            Text(tool.name)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(Self.tintForTool(tool.name))
-            if let detail = tool.detail, !detail.isEmpty {
+            // For file tools, show just the filename like Vibe Island.
+            // For Bash/other, show tool name + detail.
+            let isFileTool = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"].contains(tool.name)
+            if isFileTool, let detail = tool.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.middle)
+            } else {
+                Text(tool.name)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(Self.tintForTool(tool.name))
+                if let detail = tool.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
         }
     }
@@ -579,8 +608,24 @@ struct NotchView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.blue.opacity(0.9))
             }
+        case .compacting:
+            HStack(spacing: 4) {
+                WorkingDot(color: .purple)
+                Text("Compacting context...")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.purple.opacity(0.9))
+            }
         case .awaitingApproval:
             permissionCard(for: session)
+        case .interrupted:
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 5, height: 5)
+                Text("Interrupted")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.orange.opacity(0.9))
+            }
         case .idle:
             conversationCard(for: session)
         }
@@ -674,8 +719,8 @@ struct NotchView: View {
                 }
             }
 
-            // Permission buttons: Deny / Allow Once / Bypass
-            HStack(spacing: 6) {
+            // Permission buttons: Deny / Allow Once / Always Allow / Bypass
+            HStack(spacing: 5) {
                 permButton("Deny",
                            bg: Color.white.opacity(0.08),
                            fg: .white.opacity(0.8),
@@ -685,6 +730,11 @@ struct NotchView: View {
                            bg: Color.white.opacity(0.08),
                            fg: .white.opacity(0.9),
                            decision: "allow",
+                           sessionId: session.sessionID)
+                permButton("Always Allow",
+                           bg: Color.green.opacity(0.35),
+                           fg: .white,
+                           decision: "always_allow",
                            sessionId: session.sessionID)
                 permButton("Bypass",
                            bg: Color.red.opacity(0.55),
@@ -898,7 +948,9 @@ struct PixelAvatar: View {
     private var color: Color {
         switch status {
         case .working:          return .blue
+        case .compacting:       return .purple
         case .awaitingApproval: return .orange
+        case .interrupted:      return .orange
         case .idle:             return .green
         }
     }

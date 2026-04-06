@@ -140,9 +140,15 @@ final class HookServer {
         if decision == "bypass" {
             response = ["decision": "approve"]
         } else {
-            let decisionObj: [String: Any] = decision == "deny"
-                ? ["behavior": "deny", "message": "Denied via ClaudeNotch"]
-                : ["behavior": "allow"]
+            let decisionObj: [String: Any]
+            switch decision {
+            case "deny":
+                decisionObj = ["behavior": "deny", "message": "Denied via ClaudeNotch"]
+            case "always_allow":
+                decisionObj = ["behavior": "allow", "remember": true]
+            default: // "allow"
+                decisionObj = ["behavior": "allow"]
+            }
             response = [
                 "hookSpecificOutput": [
                     "hookEventName": "PermissionRequest",
