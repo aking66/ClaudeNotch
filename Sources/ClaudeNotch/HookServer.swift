@@ -22,6 +22,10 @@ final class HookServer {
     private var running = false
     private let handler: (Event) -> Void
 
+    /// Open client fds for PermissionRequest hooks that are blocking,
+    /// waiting for a decision from the UI. Keyed by session_id.
+    private var pendingApprovals: [String: Int32] = [:]
+
     init(handler: @escaping (Event) -> Void) {
         self.handler = handler
     }
@@ -98,7 +102,37 @@ final class HookServer {
             close(listenFd)
             listenFd = -1
         }
+        // Close any pending approval connections.
+        for (_, clientFd) in pendingApprovals {
+            close(clientFd)
+        }
+        pendingApprovals.removeAll()
         unlink(Self.socketURL.path)
+    }
+
+    // MARK: - Permission approval resolution
+
+    /// Called from the UI when the user clicks Allow / Deny on a pending
+    /// permission prompt. Writes the decision JSON back to the bridge
+    /// process that's blocking on the socket, which in turn writes it to
+    /// stdout for Claude Code to read.
+    func resolvePermission(sessionId: String, decision: String) {
+        guard let clientFd = pendingApprovals.removeValue(forKey: sessionId) else {
+            NSLog("ClaudeNotch: no pending approval for session \(sessionId)")
+            return
+        }
+
+        let response: [String: Any] = [
+            "hookSpecificOutput": ["decision": decision]
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: response) {
+            data.withUnsafeBytes { buf in
+                guard let base = buf.baseAddress else { return }
+                _ = send(clientFd, base, buf.count, 0)
+            }
+        }
+        close(clientFd)
+        NSLog("ClaudeNotch: resolved permission for \(sessionId) → \(decision)")
     }
 
     // MARK: - Accept loop (runs on background queue)
@@ -114,15 +148,38 @@ final class HookServer {
                 continue
             }
 
+            // The bridge sends the JSON payload then shuts down its write
+            // end (SHUT_WR). Our drain sees EOF and returns the full data.
             let data = Self.drain(clientFd: clientFd)
-            close(clientFd)
 
             guard !data.isEmpty,
                   let event = Self.parseEvent(data)
-            else { continue }
+            else {
+                close(clientFd)
+                continue
+            }
+
+            let isPermission = event.hookEventName == "PermissionRequest"
+
+            if !isPermission {
+                // Fire-and-forget: close the connection immediately.
+                close(clientFd)
+            }
+            // PermissionRequest: keep clientFd OPEN so the bridge blocks
+            // on read until we write the decision back (resolvePermission).
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+
+                if isPermission, let sid = event.sessionId {
+                    // Close any stale pending fd for this session before
+                    // storing the new one (e.g. user cancelled and retried).
+                    if let old = self.pendingApprovals[sid] {
+                        close(old)
+                    }
+                    self.pendingApprovals[sid] = clientFd
+                }
+
                 self.handler(event)
             }
         }

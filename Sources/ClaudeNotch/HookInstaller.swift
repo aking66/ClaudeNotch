@@ -6,21 +6,22 @@ import Foundation
 /// osascript notifications, etc. keep working in parallel).
 enum HookInstaller {
 
-    /// Events we want to subscribe to. The tuple is (event name, use matcher).
+    /// Events we want to subscribe to. Tuple: (event name, use matcher, timeout).
     /// The matcher "*" is required for tool-related events; other events
-    /// don't use matchers at all.
-    private static let events: [(name: String, useMatcher: Bool)] = [
-        ("UserPromptSubmit", false),
-        ("PreToolUse",       true),
-        ("PostToolUse",      true),
-        ("PermissionRequest", true),
-        ("Notification",     true),
-        ("Stop",             false),
-        ("SessionStart",     false),
-        ("SessionEnd",       false),
-        ("SubagentStart",    false),
-        ("SubagentStop",     false),
-        ("PreCompact",       false),
+    /// don't use matchers at all. PermissionRequest gets a 24h timeout so
+    /// the bridge can block until the user clicks Allow/Deny in the notch.
+    private static let events: [(name: String, useMatcher: Bool, timeout: Int?)] = [
+        ("UserPromptSubmit", false, nil),
+        ("PreToolUse",       true,  nil),
+        ("PostToolUse",      true,  nil),
+        ("PermissionRequest", true, 86400),   // 24h — bridge blocks for decision
+        ("Notification",     true,  nil),
+        ("Stop",             false, nil),
+        ("SessionStart",     false, nil),
+        ("SessionEnd",       false, nil),
+        ("SubagentStart",    false, nil),
+        ("SubagentStop",     false, nil),
+        ("PreCompact",       false, nil),
     ]
 
     private static var settingsURL: URL {
@@ -53,7 +54,7 @@ enum HookInstaller {
               let hooks = settings["hooks"] as? [String: Any]
         else { return false }
 
-        for (event, _) in events {
+        for (event, _, _) in events {
             if !hookArrayContainsBridge(hooks[event]) { return false }
         }
         return true
@@ -66,12 +67,29 @@ enum HookInstaller {
         var hooks = (settings["hooks"] as? [String: Any]) ?? [:]
 
         var added = 0
-        for (event, useMatcher) in events {
+        for (event, useMatcher, timeout) in events {
             var eventEntries = (hooks[event] as? [[String: Any]]) ?? []
-            if eventEntries.contains(where: entryIsOurBridge) {
-                continue  // already wired
+            let existingIdx = eventEntries.firstIndex(where: entryIsOurBridge)
+
+            if let idx = existingIdx {
+                // Already present — but upgrade it if the timeout changed
+                // (e.g. PermissionRequest gained timeout: 86400 after the
+                // initial install that didn't have it).
+                let needsUpgrade: Bool = {
+                    guard let hookArr = eventEntries[idx]["hooks"] as? [[String: Any]],
+                          let hook = hookArr.first else { return true }
+                    let currentTimeout = hook["timeout"] as? Int
+                    return currentTimeout != timeout
+                }()
+                if needsUpgrade {
+                    eventEntries[idx] = makeEntry(useMatcher: useMatcher, timeout: timeout)
+                    hooks[event] = eventEntries
+                    added += 1
+                }
+                continue
             }
-            eventEntries.append(makeEntry(useMatcher: useMatcher))
+
+            eventEntries.append(makeEntry(useMatcher: useMatcher, timeout: timeout))
             hooks[event] = eventEntries
             added += 1
         }
@@ -93,7 +111,7 @@ enum HookInstaller {
         else { return (0, nil) }
 
         var removed = 0
-        for (event, _) in events {
+        for (event, _, _) in events {
             guard var eventEntries = hooks[event] as? [[String: Any]] else { continue }
             let before = eventEntries.count
             eventEntries.removeAll(where: entryIsOurBridge)
@@ -137,15 +155,15 @@ enum HookInstaller {
         }
     }
 
-    private static func makeEntry(useMatcher: Bool) -> [String: Any] {
-        var entry: [String: Any] = [
-            "hooks": [
-                [
-                    "command": bridgePath,
-                    "type": "command"
-                ] as [String: Any]
-            ]
+    private static func makeEntry(useMatcher: Bool, timeout: Int? = nil) -> [String: Any] {
+        var hook: [String: Any] = [
+            "command": bridgePath,
+            "type": "command"
         ]
+        if let timeout {
+            hook["timeout"] = timeout
+        }
+        var entry: [String: Any] = ["hooks": [hook]]
         if useMatcher {
             entry["matcher"] = "*"
         }

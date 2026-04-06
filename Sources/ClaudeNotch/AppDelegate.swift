@@ -135,6 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
+    /// Called by the NotchView's permission buttons to send a decision
+    /// back to the Claude Code CLI through the bridge socket.
+    func resolvePermission(sessionId: String, decision: String) {
+        hookServer?.resolvePermission(sessionId: sessionId, decision: decision)
+    }
+
     @objc private func uninstallHooksAction() {
         do {
             let result = try HookInstaller.uninstall()

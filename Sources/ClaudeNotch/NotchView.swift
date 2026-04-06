@@ -385,6 +385,7 @@ struct NotchView: View {
     }
 
     /// Status line under a row — per-state label with a tinted indicator.
+    /// When awaiting approval, render Allow / Deny buttons inline.
     @ViewBuilder
     private func statusLabel(for session: ClaudeSession) -> some View {
         switch session.status {
@@ -396,17 +397,59 @@ struct NotchView: View {
                     .foregroundColor(.blue.opacity(0.9))
             }
         case .awaitingApproval:
-            HStack(spacing: 4) {
-                WorkingDot(color: .orange)
-                Text("Awaiting approval")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.orange.opacity(0.95))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 4) {
+                    WorkingDot(color: .orange)
+                    Text("Awaiting approval")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.orange.opacity(0.95))
+                }
+                permissionButtons(for: session)
             }
         case .idle:
             Text("Done")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.green.opacity(0.6))
         }
+    }
+
+    /// Inline Allow / Deny / Always Allow buttons for pending permission.
+    private func permissionButtons(for session: ClaudeSession) -> some View {
+        HStack(spacing: 8) {
+            permissionButton("Deny", color: .gray, decision: "deny",
+                             sessionId: session.sessionID)
+            permissionButton("Allow Once", color: .blue, decision: "allow",
+                             sessionId: session.sessionID)
+            permissionButton("Always Allow", color: .green, decision: "allow",
+                             sessionId: session.sessionID)
+        }
+    }
+
+    private func permissionButton(
+        _ label: String,
+        color: Color,
+        decision: String,
+        sessionId: String
+    ) -> some View {
+        Button {
+            resolvePermission(sessionId: sessionId, decision: decision)
+        } label: {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(color.opacity(0.7))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func resolvePermission(sessionId: String, decision: String) {
+        // Walk up to the AppDelegate to reach the HookServer.
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+        appDelegate.resolvePermission(sessionId: sessionId, decision: decision)
     }
 
     /// Compose "ProjectName · session-slug" using the jsonl's slug field when

@@ -5,7 +5,12 @@ import Darwin
 // =================
 // Invoked by Claude Code hooks configured in ~/.claude/settings.json.
 // Reads a single JSON event from stdin, forwards it to the running
-// ClaudeNotch main app via a Unix domain socket, then exits.
+// ClaudeNotch main app via a Unix domain socket.
+//
+// For most events: fire-and-forget — send and exit immediately.
+// For PermissionRequest: the bridge WAITS for the main app to send
+// back a decision (allow / deny) and writes it to stdout so Claude
+// Code can act on it without the user touching the terminal.
 //
 // If the main app isn't running (socket doesn't exist or connect fails)
 // we just exit silently with 0 — hooks must never block Claude Code.
@@ -20,6 +25,14 @@ let socketPath: String = {
 // 1. Drain stdin. Claude Code writes a single JSON object then closes.
 let payload = FileHandle.standardInput.readDataToEndOfFile()
 guard !payload.isEmpty else { exit(0) }
+
+// Detect if this is a PermissionRequest (needs a blocking response).
+let isPermissionRequest: Bool = {
+    guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+        return false
+    }
+    return (obj["hook_event_name"] as? String) == "PermissionRequest"
+}()
 
 // 2. Open a Unix stream socket.
 let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -47,10 +60,10 @@ let connectResult = withUnsafePointer(to: &addr) { addrPtr in
 guard connectResult == 0 else { exit(0) }
 
 // 5. Send the payload plus a trailing newline as a framing delimiter.
-var remaining = payload
-remaining.append(contentsOf: [0x0A])  // "\n"
+var outgoing = payload
+outgoing.append(contentsOf: [0x0A])  // "\n"
 
-remaining.withUnsafeBytes { rawBuffer in
+outgoing.withUnsafeBytes { rawBuffer in
     guard let base = rawBuffer.baseAddress else { return }
     var offset = 0
     let total = rawBuffer.count
@@ -59,6 +72,31 @@ remaining.withUnsafeBytes { rawBuffer in
         if sent <= 0 { break }
         offset += sent
     }
+}
+
+if isPermissionRequest {
+    // 6a. PermissionRequest: shut down the write direction so the server
+    //     sees EOF and knows the event payload is complete, but keep the
+    //     read direction open so we can receive the decision.
+    shutdown(fd, SHUT_WR)
+
+    // 7. Block until the main app writes a decision (or the socket dies).
+    var response = Data()
+    var chunk = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let n = recv(fd, &chunk, chunk.count, 0)
+        if n <= 0 { break }
+        response.append(chunk, count: n)
+    }
+
+    // 8. Write the decision to stdout. Claude Code reads it and either
+    //    proceeds with the tool call or shows its built-in prompt.
+    if !response.isEmpty {
+        FileHandle.standardOutput.write(response)
+    }
+} else {
+    // 6b. Non-blocking events: nothing to wait for.
+    shutdown(fd, SHUT_WR)
 }
 
 exit(0)
