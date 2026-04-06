@@ -67,18 +67,19 @@ struct NotchView: View {
                 }
             }
             // Auto-expand focused on the specific session that triggered.
-            .onChange(of: watcher.autoExpandSessionId) { newId in
-                guard let sid = newId else { return }
+            // Uses a counter so onChange always fires even for repeat events.
+            .onChange(of: watcher.autoExpandCounter) { _ in
+                guard let sid = watcher.autoExpandFocusedSession else { return }
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
                     isExpanded = true
                     autoExpanded = true
                     focusedSessionId = sid
                     showAllSessions = false
                 }
-                // Auto-collapse after 10 seconds if user doesn't interact
-                let capturedId = sid
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                    if autoExpanded && focusedSessionId == capturedId {
+                // Auto-collapse after 12 seconds if user doesn't interact
+                let counter = watcher.autoExpandCounter
+                DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+                    if autoExpanded && watcher.autoExpandCounter == counter {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
                             isExpanded = false
                             autoExpanded = false

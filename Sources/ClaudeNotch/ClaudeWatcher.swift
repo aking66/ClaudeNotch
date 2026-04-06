@@ -79,10 +79,12 @@ struct ClaudeSession: Identifiable, Hashable {
 final class ClaudeWatcher: ObservableObject {
     @Published private(set) var sessions: [ClaudeSession] = []
 
-    /// Set by hook events that should auto-expand the notch panel.
-    /// Contains the session ID so the UI can focus on just that session
-    /// instead of showing the full list.
-    @Published var autoExpandSessionId: String?
+    /// Incremented on every event that should auto-expand. Using a
+    /// counter instead of a session-id string guarantees SwiftUI's
+    /// onChange fires even when the same session triggers twice.
+    @Published var autoExpandCounter: Int = 0
+    /// Which session to focus on when auto-expanding.
+    var autoExpandFocusedSession: String?
 
     private var timer: Timer?
     private let activeWindow: TimeInterval = 20 * 60  // 20 minutes
@@ -274,7 +276,8 @@ final class ClaudeWatcher: ObservableObject {
 
         // Auto-expand the notch panel focused on THIS session.
         if event.hookEventName == "PermissionRequest" || event.hookEventName == "Stop" {
-            autoExpandSessionId = sid
+            autoExpandFocusedSession = sid
+            autoExpandCounter += 1
         }
 
         guard let newStatus = Self.statusFromHookEvent(event.hookEventName) else {
