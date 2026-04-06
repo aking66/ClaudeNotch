@@ -9,8 +9,10 @@ struct NotchView: View {
     @State private var tick = 0
     @State private var isExpanded = false
     @State private var hoveredSessionID: ClaudeSession.ID?
-    @State private var showUsageLimits = false
+    @State private var showUsageLimits = true
     @State private var showAllSessions = false
+    @State private var autoExpanded = false
+    @State private var focusedSessionId: String?
 
     /// Rows visible before the user taps "Show all N sessions".
     private let defaultRowLimit = 3
@@ -49,13 +51,40 @@ struct NotchView: View {
             .contentShape(shape)
             .onHover { hovering in
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
-                    isExpanded = hovering
+                    if hovering {
+                        isExpanded = true
+                    } else if !autoExpanded {
+                        // Don't collapse if the panel was auto-expanded by
+                        // an event — let it stay until mouse enters + leaves.
+                        isExpanded = false
+                    }
                 }
-                // Opportunistically refresh the usage limits when the panel
-                // opens, so the numbers match Anthropic's live state while
-                // the user is actively looking at them.
                 if hovering {
+                    autoExpanded = false  // user took over
                     usage.refreshIfStale(maxAge: 20)
+                } else {
+                    focusedSessionId = nil  // clear focus on mouse leave
+                }
+            }
+            // Auto-expand focused on the specific session that triggered.
+            .onChange(of: watcher.autoExpandSessionId) { newId in
+                guard let sid = newId else { return }
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                    isExpanded = true
+                    autoExpanded = true
+                    focusedSessionId = sid
+                    showAllSessions = false
+                }
+                // Auto-collapse after 10 seconds if user doesn't interact
+                let capturedId = sid
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                    if autoExpanded && focusedSessionId == capturedId {
+                        withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                            isExpanded = false
+                            autoExpanded = false
+                            focusedSessionId = nil
+                        }
+                    }
                 }
             }
         }
@@ -107,7 +136,27 @@ struct NotchView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.white.opacity(0.4))
                     .padding(.top, 4)
+            } else if let fid = focusedSessionId,
+                      let focused = watcher.sessions.first(where: { $0.sessionID == fid }) {
+                // Focus mode: show only the triggered session.
+                sessionRow(focused)
+                if watcher.sessions.count > 1 {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            focusedSessionId = nil
+                            autoExpanded = false
+                        }
+                    } label: {
+                        Text("Show all \(watcher.sessions.count) sessions")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.white.opacity(0.45))
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
             } else {
+                // Normal mode: show all sessions.
                 let visible = showAllSessions
                     ? Array(watcher.sessions)
                     : Array(watcher.sessions.prefix(defaultRowLimit))
@@ -116,7 +165,7 @@ struct NotchView: View {
                         sessionRow(session)
                     }
                 }
-                if watcher.sessions.count > defaultRowLimit {
+                if watcher.sessions.count > defaultRowLimit && !showAllSessions {
                     showAllButton
                 }
             }
@@ -397,59 +446,138 @@ struct NotchView: View {
                     .foregroundColor(.blue.opacity(0.9))
             }
         case .awaitingApproval:
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 4) {
-                    WorkingDot(color: .orange)
-                    Text("Awaiting approval")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.orange.opacity(0.95))
-                }
-                permissionButtons(for: session)
-            }
+            permissionCard(for: session)
         case .idle:
-            Text("Done")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.green.opacity(0.6))
+            conversationCard(for: session)
         }
     }
 
-    /// Inline Allow / Deny / Always Allow buttons for pending permission.
-    private func permissionButtons(for session: ClaudeSession) -> some View {
-        HStack(spacing: 8) {
-            permissionButton("Deny", color: .gray, decision: "deny",
-                             sessionId: session.sessionID)
-            permissionButton("Allow Once", color: .blue, decision: "allow",
-                             sessionId: session.sessionID)
-            permissionButton("Always Allow", color: .green, decision: "allow",
-                             sessionId: session.sessionID)
+    /// Dark card showing the last conversation turn: user message on top
+    /// with "Done" label, assistant response below. Matches Vibe Island's
+    /// auto-expand-on-completion card.
+    private func conversationCard(for session: ClaudeSession) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                if let userMsg = session.lastUserMessage, !userMsg.isEmpty {
+                    Text("You:  " + userMsg)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.75))
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text("Done")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white.opacity(0.5))
+            }
+
+            if let full = session.assistantFull, !full.isEmpty {
+                Text(full)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.55))
+                    .lineLimit(4)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                )
+        )
+    }
+
+    /// Full permission card matching Vibe Island's layout:
+    /// ⚠ Bash label → dark code box with $ command + description → 4 buttons
+    private func permissionCard(for session: ClaudeSession) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // ⚠ Bash label
+            if let tool = session.currentTool {
+                HStack(spacing: 4) {
+                    Text("⚠")
+                        .foregroundColor(.orange)
+                    Text(tool.name)
+                        .foregroundColor(.orange)
+                        .fontWeight(.bold)
+                }
+                .font(.system(size: 11, design: .monospaced))
+
+                // Dark code box
+                VStack(alignment: .leading, spacing: 4) {
+                    if let detail = tool.detail, !detail.isEmpty {
+                        Text("$ " + detail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.85))
+                            .lineLimit(2)
+                    }
+                    if let desc = tool.description, !desc.isEmpty {
+                        Text(desc)
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.45))
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+            }
+
+            // 4 buttons: Deny / Allow Once / Always Allow / Bypass
+            HStack(spacing: 6) {
+                permButton("Deny",
+                           bg: Color.white.opacity(0.08),
+                           fg: .white.opacity(0.8),
+                           decision: "deny",
+                           sessionId: session.sessionID)
+                permButton("Allow Once",
+                           bg: Color.white.opacity(0.08),
+                           fg: .white.opacity(0.9),
+                           decision: "allow",
+                           sessionId: session.sessionID)
+                permButton("Always Allow",
+                           bg: Color.blue.opacity(0.75),
+                           fg: .white,
+                           decision: "allow",
+                           sessionId: session.sessionID)
+                permButton("Bypass",
+                           bg: Color.red.opacity(0.55),
+                           fg: .white,
+                           decision: "bypass",
+                           sessionId: session.sessionID)
+            }
         }
     }
 
-    private func permissionButton(
+    private func permButton(
         _ label: String,
-        color: Color,
+        bg: Color,
+        fg: Color,
         decision: String,
         sessionId: String
     ) -> some View {
         Button {
-            resolvePermission(sessionId: sessionId, decision: decision)
+            guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+            appDelegate.resolvePermission(sessionId: sessionId, decision: decision)
         } label: {
             Text(label)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
+                .foregroundColor(fg)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
                 .background(
-                    Capsule().fill(color.opacity(0.7))
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(bg)
                 )
         }
         .buttonStyle(.plain)
-    }
-
-    private func resolvePermission(sessionId: String, decision: String) {
-        // Walk up to the AppDelegate to reach the HookServer.
-        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
-        appDelegate.resolvePermission(sessionId: sessionId, decision: decision)
     }
 
     /// Compose "ProjectName · session-slug" using the jsonl's slug field when

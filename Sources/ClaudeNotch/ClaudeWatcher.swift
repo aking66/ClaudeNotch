@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import UserNotifications
 
@@ -28,6 +29,7 @@ struct UsageStats: Hashable {
 struct CurrentTool: Hashable {
     let name: String          // e.g. "Bash", "Edit", "Read"
     let detail: String?       // a short summary of the tool input
+    let description: String?  // human description from tool_input.description
 }
 
 /// A single active Claude Code session discovered on disk.
@@ -35,12 +37,14 @@ struct ClaudeSession: Identifiable, Hashable {
     let id: URL          // path to the .jsonl file
     let projectName: String
     let lastModified: Date
-    let lastSnippet: String?    // Last assistant text, cleaned + truncated
-    let status: SessionStatus   // Working / awaiting approval / idle
-    let cwd: String?            // Authoritative working dir from the jsonl entries
-    let usage: UsageStats?      // Cumulative token usage + cost
-    let gitBranch: String?      // Current git branch from the jsonl
-    let currentTool: CurrentTool?  // Tool currently in flight (hook-driven)
+    let lastSnippet: String?        // Last assistant text, ~120 chars
+    let assistantFull: String?      // Last assistant text, ~500 chars (conversation card)
+    let lastUserMessage: String?    // Last user message, ~200 chars
+    let status: SessionStatus       // Working / awaiting approval / idle
+    let cwd: String?                // Authoritative working dir from the jsonl entries
+    let usage: UsageStats?          // Cumulative token usage + cost
+    let gitBranch: String?          // Current git branch from the jsonl
+    let currentTool: CurrentTool?   // Tool currently in flight (hook-driven)
 
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
@@ -52,35 +56,20 @@ struct ClaudeSession: Identifiable, Hashable {
         id.deletingPathExtension().lastPathComponent
     }
 
-    /// Return a copy with a different status. Used when a hook event
-    /// arrives and overrides the jsonl-derived value.
     func with(status newStatus: SessionStatus) -> ClaudeSession {
-        ClaudeSession(
-            id: id,
-            projectName: projectName,
-            lastModified: lastModified,
-            lastSnippet: lastSnippet,
-            status: newStatus,
-            cwd: cwd,
-            usage: usage,
-            gitBranch: gitBranch,
-            currentTool: currentTool
-        )
+        ClaudeSession(id: id, projectName: projectName, lastModified: lastModified,
+                      lastSnippet: lastSnippet, assistantFull: assistantFull,
+                      lastUserMessage: lastUserMessage, status: newStatus,
+                      cwd: cwd, usage: usage, gitBranch: gitBranch,
+                      currentTool: currentTool)
     }
 
-    /// Return a copy with a different currentTool.
     func with(currentTool newTool: CurrentTool?) -> ClaudeSession {
-        ClaudeSession(
-            id: id,
-            projectName: projectName,
-            lastModified: lastModified,
-            lastSnippet: lastSnippet,
-            status: status,
-            cwd: cwd,
-            usage: usage,
-            gitBranch: gitBranch,
-            currentTool: newTool
-        )
+        ClaudeSession(id: id, projectName: projectName, lastModified: lastModified,
+                      lastSnippet: lastSnippet, assistantFull: assistantFull,
+                      lastUserMessage: lastUserMessage, status: status,
+                      cwd: cwd, usage: usage, gitBranch: gitBranch,
+                      currentTool: newTool)
     }
 }
 
@@ -89,6 +78,11 @@ struct ClaudeSession: Identifiable, Hashable {
 @MainActor
 final class ClaudeWatcher: ObservableObject {
     @Published private(set) var sessions: [ClaudeSession] = []
+
+    /// Set by hook events that should auto-expand the notch panel.
+    /// Contains the session ID so the UI can focus on just that session
+    /// instead of showing the full list.
+    @Published var autoExpandSessionId: String?
 
     private var timer: Timer?
     private let activeWindow: TimeInterval = 20 * 60  // 20 minutes
@@ -223,6 +217,8 @@ final class ClaudeWatcher: ObservableObject {
                     projectName: Self.decodeProjectName(dir.lastPathComponent),
                     lastModified: mod,
                     lastSnippet: tail.snippet,
+                    assistantFull: tail.assistantFull,
+                    lastUserMessage: tail.lastUserMessage,
                     status: status,
                     cwd: tail.cwd,
                     usage: usage,
@@ -260,18 +256,25 @@ final class ClaudeWatcher: ObservableObject {
         switch event.hookEventName {
         case "PreToolUse":
             if let name = event.toolName {
+                let desc = event.toolInput?["description"] as? String
                 currentTools[sid] = CurrentTool(
                     name: name,
                     detail: Self.describeToolInput(
                         toolName: name,
                         input: event.toolInput
-                    )
+                    ),
+                    description: desc
                 )
             }
         case "PostToolUse", "Stop", "SessionEnd":
             currentTools[sid] = nil
         default:
             break
+        }
+
+        // Auto-expand the notch panel focused on THIS session.
+        if event.hookEventName == "PermissionRequest" || event.hookEventName == "Stop" {
+            autoExpandSessionId = sid
         }
 
         guard let newStatus = Self.statusFromHookEvent(event.hookEventName) else {
@@ -416,8 +419,9 @@ final class ClaudeWatcher: ObservableObject {
 
     // MARK: - Notifications
 
-    /// React to a session status change. Fires a user notification on the
-    /// two transitions that matter most: completion and approval-wait.
+    /// React to a session status change. Fires a user notification and
+    /// plays an audio cue on the two transitions that matter most:
+    /// completion and approval-wait.
     private func handleTransition(
         from previous: SessionStatus,
         to current: SessionStatus,
@@ -425,21 +429,15 @@ final class ClaudeWatcher: ObservableObject {
     ) {
         // Completion: something was happening, now idle.
         if previous.isBusy && current == .idle {
-            postNotification(
-                title: "Claude finished",
-                body: projectName,
-                sound: true
-            )
+            postNotification(title: "Claude finished", body: projectName, sound: true)
+            NSSound(named: "Hero")?.play()
             return
         }
 
         // New approval request (either fresh start or transition from working).
         if current == .awaitingApproval && previous != .awaitingApproval {
-            postNotification(
-                title: "Claude needs approval",
-                body: projectName,
-                sound: true
-            )
+            postNotification(title: "Claude needs approval", body: projectName, sound: true)
+            NSSound(named: "Glass")?.play()
         }
     }
 
@@ -471,7 +469,9 @@ final class ClaudeWatcher: ObservableObject {
 
     /// Everything parseTail extracts from the session file tail.
     struct TailParseResult {
-        let snippet: String?
+        let snippet: String?               // assistant text, ~120 chars
+        let assistantFull: String?          // assistant text, ~500 chars (for conversation card)
+        let lastUserMessage: String?        // user's last message, ~200 chars
         let cwd: String?
         let branch: String?
         let lastEntryKind: LastEntryKind
@@ -482,7 +482,7 @@ final class ClaudeWatcher: ObservableObject {
     /// bigger than that are handled upstream by keeping the previous status
     /// on parse failure.
     private static func parseTail(_ url: URL) -> TailParseResult {
-        let empty = TailParseResult(snippet: nil, cwd: nil, branch: nil, lastEntryKind: .unknown)
+        let empty = TailParseResult(snippet: nil, assistantFull: nil, lastUserMessage: nil, cwd: nil, branch: nil, lastEntryKind: .unknown)
 
         guard let handle = try? FileHandle(forReadingFrom: url) else { return empty }
         defer { try? handle.close() }
@@ -500,6 +500,8 @@ final class ClaudeWatcher: ObservableObject {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
 
         var snippet: String? = nil
+        var assistantFull: String? = nil
+        var lastUserMessage: String? = nil
         var cwd: String? = nil
         var branch: String? = nil
         var lastEntryKind: LastEntryKind = .unknown
@@ -526,31 +528,60 @@ final class ClaudeWatcher: ObservableObject {
                 branch = b
             }
 
-            // Capture the most recent assistant text content for the snippet.
-            if snippet == nil,
-               (obj["type"] as? String) == "assistant",
+            let entryType = obj["type"] as? String
+
+            // Capture the most recent assistant text content for snippets.
+            if snippet == nil, entryType == "assistant",
                let msg = obj["message"] as? [String: Any],
                let contents = msg["content"] as? [[String: Any]] {
                 for c in contents {
                     if (c["type"] as? String) == "text",
                        let txt = c["text"] as? String {
-                        var cleaned = txt
+                        let cleaned = txt
                             .replacingOccurrences(of: "\n", with: " ")
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if cleaned.count > 120 {
-                            cleaned = String(cleaned.prefix(120))
+                        if !cleaned.isEmpty {
+                            snippet = String(cleaned.prefix(120))
+                            assistantFull = String(cleaned.prefix(500))
                         }
-                        if !cleaned.isEmpty { snippet = cleaned }
                         break
                     }
                 }
             }
 
-            if lastEntryResolved && snippet != nil && cwd != nil && branch != nil { break }
+            // Capture the most recent user message text.
+            if lastUserMessage == nil, entryType == "user",
+               let msg = obj["message"] as? [String: Any],
+               let content = msg["content"] {
+                // User messages can be a string or an array of content blocks.
+                let text: String?
+                if let str = content as? String {
+                    text = str
+                } else if let blocks = content as? [[String: Any]] {
+                    text = blocks.compactMap { b -> String? in
+                        guard (b["type"] as? String) == "text" else { return nil }
+                        return b["text"] as? String
+                    }.first
+                } else {
+                    text = nil
+                }
+                if let t = text {
+                    var cleaned = t.replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cleaned.count > 200 { cleaned = String(cleaned.prefix(200)) }
+                    if !cleaned.isEmpty { lastUserMessage = cleaned }
+                }
+            }
+
+            let allFound = lastEntryResolved && snippet != nil && cwd != nil
+                && branch != nil && lastUserMessage != nil
+            if allFound { break }
         }
 
         return TailParseResult(
             snippet: snippet,
+            assistantFull: assistantFull,
+            lastUserMessage: lastUserMessage,
             cwd: cwd,
             branch: branch,
             lastEntryKind: lastEntryKind
