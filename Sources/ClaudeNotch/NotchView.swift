@@ -96,18 +96,19 @@ struct NotchView: View {
                     focusedSessionId = sid
                     showAllSessions = false
                 }
-                // Determine if this is a "done" event (Stop) or permission.
-                // Done cards collapse faster (8s) vs permission stays longer (25s).
+                // Done cards auto-collapse after 8s. Permission cards STAY
+                // until the user responds (no timeout).
                 let session = watcher.sessions.first { $0.sessionID == sid }
-                let isDone = session?.status == .idle
-                let timeout: TimeInterval = isDone ? 8 : 25
-                let counter = watcher.autoExpandCounter
-                DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-                    if autoExpanded && watcher.autoExpandCounter == counter {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                            isExpanded = false
-                            autoExpanded = false
-                            focusedSessionId = nil
+                let isPermission = session?.status == .awaitingApproval
+                if !isPermission {
+                    let counter = watcher.autoExpandCounter
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                        if autoExpanded && watcher.autoExpandCounter == counter {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                                isExpanded = false
+                                autoExpanded = false
+                                focusedSessionId = nil
+                            }
                         }
                     }
                 }
@@ -461,7 +462,8 @@ struct NotchView: View {
             }
         }
 
-        if let tool = session.currentTool {
+        // Hide tool badge when permission card is showing (avoids duplication)
+        if session.status != .awaitingApproval, let tool = session.currentTool {
             toolBadge(tool)
         }
 
@@ -686,28 +688,36 @@ struct NotchView: View {
     /// with "Done" label, assistant response below. Matches Vibe Island's
     /// auto-expand-on-completion card.
     private func conversationCard(for session: ClaudeSession) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            // Header: "You: message" + "Done" tag
+            HStack(alignment: .top) {
+                if let userMsg = session.lastUserMessage, !userMsg.isEmpty {
+                    Text("You:  " + userMsg)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text("Done")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.green)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.green.opacity(0.15))
+                    )
+            }
+
+            // Scrollable markdown content with max height
             if let full = session.assistantFull, !full.isEmpty {
-                HStack {
-                    Spacer()
-                    Text("Done")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.green.opacity(0.7))
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(Self.markdownText(full))
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.65))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
-                Text(full)
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.6))
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-            } else {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 5, height: 5)
-                    Text("Done")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.green.opacity(0.7))
-                }
+                .frame(maxHeight: 80)
             }
         }
         .padding(.horizontal, 10)
@@ -715,8 +725,20 @@ struct NotchView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.04))
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                )
         )
+    }
+
+    /// Parse markdown string into AttributedString for rich rendering.
+    private static func markdownText(_ raw: String) -> AttributedString {
+        if let md = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return md
+        }
+        return AttributedString(raw)
     }
 
     /// Full permission card matching Vibe Island's layout:
@@ -739,56 +761,49 @@ struct NotchView: View {
                 }
                 .font(.system(size: 11, design: .monospaced))
 
-                // Diff preview for Edit/Write, or simple code box for others
+                // Diff preview for Edit/Write, or command box for others
                 if let diff = tool.diffPreview {
                     diffPreviewView(diff)
                 } else {
-                    // Simple code box (Bash commands, etc.)
-                    VStack(alignment: .leading, spacing: 4) {
+                    // Code box — tall enough to show multi-line commands
+                    VStack(alignment: .leading, spacing: 6) {
                         if let detail = tool.detail, !detail.isEmpty {
-                            Text("$ " + detail)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.85))
-                                .lineLimit(2)
+                            ScrollView(.vertical, showsIndicators: false) {
+                                Text("$ " + detail)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.85))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 100)
                         }
                         if let desc = tool.description, !desc.isEmpty {
                             Text(desc)
                                 .font(.system(size: 10))
                                 .foregroundColor(.white.opacity(0.45))
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                     }
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
+                            .fill(Color(white: 0.08))
                     )
                 }
             }
 
-            // Permission buttons: Deny / Allow Once / Always Allow / Bypass
-            HStack(spacing: 5) {
+            // Permission buttons: Deny + Allow Once (like Claude Code terminal)
+            HStack(spacing: 8) {
                 permButton("Deny",
-                           bg: Color.white.opacity(0.08),
+                           bg: Color.white.opacity(0.1),
                            fg: .white.opacity(0.8),
                            decision: "deny",
                            sessionId: session.sessionID)
                 permButton("Allow Once",
-                           bg: Color.white.opacity(0.08),
-                           fg: .white.opacity(0.9),
+                           bg: Color.green.opacity(0.25),
+                           fg: .green,
                            decision: "allow",
-                           sessionId: session.sessionID)
-                permButton("Always Allow",
-                           bg: Color.green.opacity(0.35),
-                           fg: .white,
-                           decision: "always_allow",
-                           sessionId: session.sessionID)
-                permButton("Bypass",
-                           bg: Color.red.opacity(0.55),
-                           fg: .white,
-                           decision: "bypass",
                            sessionId: session.sessionID)
             }
         }

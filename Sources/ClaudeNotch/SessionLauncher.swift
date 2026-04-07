@@ -116,6 +116,31 @@ enum SessionLauncher {
         return nil
     }
 
+    // MARK: - Session terminal detection
+
+    /// Check if a session's terminal tab is currently the active/selected tab.
+    /// Uses the Terminal window title which contains the project directory name.
+    static func isSessionTerminalActive(cwd: String) -> Bool {
+        let projectName = (cwd as NSString).lastPathComponent
+        guard !projectName.isEmpty else { return false }
+        // Check if Terminal's front window title contains this project name.
+        let escaped = projectName.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Terminal"
+            if not frontmost then return "no"
+            try
+                set t to name of front window
+                if t contains "\(escaped)" then return "yes"
+            end try
+            return "no"
+        end tell
+        """
+        var errorInfo: NSDictionary?
+        guard let apple = NSAppleScript(source: script) else { return false }
+        let result = apple.executeAndReturnError(&errorInfo)
+        return result.stringValue == "yes"
+    }
+
     // MARK: - AppleScript focus
 
     /// Drive Terminal.app to select the tab whose tty matches "/dev/<tty>".

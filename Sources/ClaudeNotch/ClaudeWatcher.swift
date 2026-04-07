@@ -150,7 +150,7 @@ final class ClaudeWatcher: ObservableObject {
     var autoExpandFocusedSession: String?
 
     private var timer: Timer?
-    private let activeWindow: TimeInterval = 20 * 60  // 20 minutes
+    private let activeWindow: TimeInterval = 120 * 60  // 2 hours — show all recent sessions
 
     /// Cache parsed usage per session file. Keyed by URL, value includes the
     /// file mtime at parse time so we can invalidate cheaply.
@@ -508,11 +508,19 @@ final class ClaudeWatcher: ObservableObject {
         }
 
         // Auto-expand the notch panel focused on THIS session.
-        // Suppress when terminal is focused (user already sees Claude output).
-        if event.hookEventName == "PermissionRequest" || event.hookEventName == "Stop" {
-            let suppress = focusMonitor?.isTerminalFocused == true
-                && event.hookEventName == "Stop"  // always expand for permissions
-            if !suppress {
+        // PermissionRequest: ALWAYS expand (user must respond).
+        // Stop (completion): suppress only when THIS session's terminal
+        // tab is active (user already sees the output).
+        if event.hookEventName == "PermissionRequest" {
+            autoExpandFocusedSession = sid
+            autoExpandCounter += 1
+        } else if event.hookEventName == "Stop" {
+            // Check if the user is looking at THIS session's terminal.
+            let sessionCwd = baseSessions.values.first(where: { $0.sessionID == sid })?.cwd
+            let isThisSessionFocused = focusMonitor?.isTerminalFocused == true
+                && sessionCwd != nil
+                && SessionLauncher.isSessionTerminalActive(cwd: sessionCwd!)
+            if !isThisSessionFocused {
                 autoExpandFocusedSession = sid
                 autoExpandCounter += 1
             }
@@ -799,12 +807,12 @@ final class ClaudeWatcher: ObservableObject {
                 for c in contents {
                     if (c["type"] as? String) == "text",
                        let txt = c["text"] as? String {
-                        let cleaned = txt
-                            .replacingOccurrences(of: "\n", with: " ")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !cleaned.isEmpty {
-                            snippet = String(cleaned.prefix(120))
-                            assistantFull = String(cleaned.prefix(500))
+                        let trimmed = txt.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            // Snippet: single line for row display
+                            snippet = String(trimmed.replacingOccurrences(of: "\n", with: " ").prefix(120))
+                            // Full: preserve newlines for markdown rendering in card
+                            assistantFull = String(trimmed.prefix(800))
                         }
                         break
                     }

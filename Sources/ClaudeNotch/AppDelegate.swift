@@ -53,11 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
                 usage?.refreshIfStale(maxAge: 30)
-                // If user approved in terminal, clear the stale pending fd
-                // so the permission card disappears from the UI.
-                if let sid = event.sessionId {
-                    (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid)
-                }
+            }
+            // Only clear pending approval on Stop (session ended) — NOT on
+            // every PostToolUse, as that would clear the pending fd for a
+            // PermissionRequest that's still waiting while other tools run.
+            if event.hookEventName == "Stop", let sid = event.sessionId {
+                (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid)
             }
         }
         server.start()
