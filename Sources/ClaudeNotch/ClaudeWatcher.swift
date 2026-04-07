@@ -150,7 +150,7 @@ final class ClaudeWatcher: ObservableObject {
     var autoExpandFocusedSession: String?
 
     private var timer: Timer?
-    private let activeWindow: TimeInterval = 120 * 60  // 2 hours — show all recent sessions
+    private let activeWindow: TimeInterval = 20 * 60  // 20 min — shows only actively running sessions
 
     /// Cache parsed usage per session file. Keyed by URL, value includes the
     /// file mtime at parse time so we can invalidate cheaply.
@@ -171,6 +171,10 @@ final class ClaudeWatcher: ObservableObject {
     /// Current in-flight tool per session UUID, populated from
     /// `PreToolUse` hook events and cleared on `PostToolUse`.
     private var currentTools: [String: CurrentTool] = [:]
+
+    /// Sessions known to be alive via SessionStart hook (not yet SessionEnd).
+    /// Keyed by session UUID → jsonl path from the hook payload.
+    private var hookAliveSessions: [String: String] = [:]
 
     /// Active subagents per parent session UUID.
     private var sessionSubagents: [String: [Subagent]] = [:]
@@ -258,7 +262,10 @@ final class ClaudeWatcher: ObservableObject {
             let projectName = Self.decodeProjectName(dir.lastPathComponent)
             for jsonl in jsonls {
                 let mod = Self.modDate(jsonl)
-                guard mod > cutoff else { continue }
+                let sessionID = jsonl.deletingPathExtension().lastPathComponent
+                // Show if recently modified OR known alive via hooks.
+                let isHookAlive = hookAliveSessions[sessionID] != nil
+                guard mod > cutoff || isHookAlive else { continue }
 
                 let tail = Self.parseTail(jsonl)
 
@@ -359,6 +366,21 @@ final class ClaudeWatcher: ObservableObject {
     /// sub-100ms latency.
     func applyHookEvent(_ event: HookServer.Event) {
         guard let sid = event.sessionId, !sid.isEmpty else { return }
+
+        // Track alive sessions via SessionStart/SessionEnd hooks.
+        // This keeps sessions visible even when their jsonl file hasn't
+        // been modified recently (idle sessions waiting for user input).
+        if event.hookEventName == "SessionStart" {
+            if let path = event.transcriptPath {
+                hookAliveSessions[sid] = path
+            }
+        } else if event.hookEventName == "SessionEnd" {
+            hookAliveSessions.removeValue(forKey: sid)
+        }
+        // Any hook event from a session means it's alive.
+        if hookAliveSessions[sid] == nil, let path = event.transcriptPath {
+            hookAliveSessions[sid] = path
+        }
 
         // Track the in-flight tool per session so the UI can show a
         // "Bash: git show …" badge while it's running.

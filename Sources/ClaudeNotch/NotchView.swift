@@ -803,17 +803,27 @@ struct NotchView: View {
                 }
             }
 
-            // Permission buttons: Deny + Allow Once (like Claude Code terminal)
-            HStack(spacing: 8) {
+            // Permission buttons matching Claude Code + Vibe Island
+            HStack(spacing: 5) {
                 permButton("Deny",
                            bg: Color.white.opacity(0.1),
-                           fg: .white.opacity(0.8),
+                           fg: .white.opacity(0.7),
                            decision: "deny",
                            sessionId: session.sessionID)
                 permButton("Allow Once",
-                           bg: Color.green.opacity(0.25),
-                           fg: .green,
+                           bg: Color.white.opacity(0.1),
+                           fg: .white.opacity(0.85),
                            decision: "allow",
+                           sessionId: session.sessionID)
+                permButton("Always Allow  ⌥A",
+                           bg: Color.green.opacity(0.4),
+                           fg: .white,
+                           decision: "always_allow",
+                           sessionId: session.sessionID)
+                permButton("Bypass",
+                           bg: Color.red.opacity(0.5),
+                           fg: .white,
+                           decision: "bypass",
                            sessionId: session.sessionID)
             }
         }
