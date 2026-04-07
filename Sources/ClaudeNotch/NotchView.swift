@@ -6,6 +6,7 @@ import SwiftUI
 struct NotchView: View {
     @ObservedObject var watcher: ClaudeWatcher
     @ObservedObject var usage: UsageFetcher
+    @ObservedObject var focusMonitor: FocusMonitor
     @State private var tick = 0
     @State private var isExpanded = false
     @State private var hoveredSessionID: ClaudeSession.ID?
@@ -14,6 +15,7 @@ struct NotchView: View {
     @State private var autoExpanded = false
     @State private var focusedSessionId: String?
     @State private var hiddenSessionIDs: Set<String> = []
+    @State private var hoverCooldownUntil: Date = .distantPast
 
     /// Rows visible before the user taps "Show all N sessions".
     private let defaultRowLimit = 3
@@ -68,39 +70,55 @@ struct NotchView: View {
             }
             .contentShape(shape)
             .onHover { hovering in
+                if hovering && Date() < hoverCooldownUntil { return }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                     if hovering {
                         isExpanded = true
                     } else if !autoExpanded {
                         isExpanded = false
+                        hoverCooldownUntil = Date().addingTimeInterval(0.5)
                     }
                 }
                 if hovering {
-                    autoExpanded = false  // user took over
+                    autoExpanded = false
                     usage.refreshIfStale(maxAge: 20)
                 } else {
-                    focusedSessionId = nil  // clear focus on mouse leave
+                    focusedSessionId = nil
                 }
             }
             // Auto-expand focused on the specific session that triggered.
             // Uses a counter so onChange always fires even for repeat events.
             .onChange(of: watcher.autoExpandCounter) { _ in
                 guard let sid = watcher.autoExpandFocusedSession else { return }
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                     isExpanded = true
                     autoExpanded = true
                     focusedSessionId = sid
                     showAllSessions = false
                 }
-                // Auto-collapse after 25 seconds if user doesn't interact
+                // Determine if this is a "done" event (Stop) or permission.
+                // Done cards collapse faster (8s) vs permission stays longer (25s).
+                let session = watcher.sessions.first { $0.sessionID == sid }
+                let isDone = session?.status == .idle
+                let timeout: TimeInterval = isDone ? 8 : 25
                 let counter = watcher.autoExpandCounter
-                DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
                     if autoExpanded && watcher.autoExpandCounter == counter {
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                             isExpanded = false
                             autoExpanded = false
                             focusedSessionId = nil
                         }
+                    }
+                }
+            }
+            // Collapse when user switches to another app (non-terminal).
+            .onChange(of: focusMonitor.appSwitchCounter) { _ in
+                if isExpanded && autoExpanded {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                        isExpanded = false
+                        autoExpanded = false
+                        focusedSessionId = nil
                     }
                 }
             }
@@ -133,8 +151,15 @@ struct NotchView: View {
                 }
             }
             Spacer(minLength: 4)
-            // Usage pill: "✦ 5h 3%" or session count
-            if let limit = usage.utilization?.five_hour {
+            // Usage pill: "✦ 5h 3%" or "⚠ Unavailable" or session count
+            if usage.lastError != nil && usage.utilization == nil {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange.opacity(0.6))
+                Text("Unavailable")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.white.opacity(0.35))
+            } else if let limit = usage.utilization?.five_hour {
                 Image(systemName: "sparkle")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.orange)
@@ -266,23 +291,33 @@ struct NotchView: View {
     // (expired token, offline, first tick, etc).
     private var usageLimitView: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.orange)
+            if usage.lastError != nil && usage.utilization == nil {
+                // No data at all — show unavailable
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange.opacity(0.7))
+                Text("Unavailable")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.4))
+            } else {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.orange)
 
-            limitSegment(
-                label: "5h",
-                limit: usage.utilization?.five_hour
-            )
+                limitSegment(
+                    label: "5h",
+                    limit: usage.utilization?.five_hour
+                )
 
-            Text("|")
-                .foregroundColor(.white.opacity(0.2))
-                .padding(.horizontal, 2)
+                Text("|")
+                    .foregroundColor(.white.opacity(0.2))
+                    .padding(.horizontal, 2)
 
-            limitSegment(
-                label: "7d",
-                limit: usage.utilization?.seven_day
-            )
+                limitSegment(
+                    label: "7d",
+                    limit: usage.utilization?.seven_day
+                )
+            }
         }
         .font(.system(size: 11, weight: .semibold, design: .monospaced))
     }

@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var watcher: ClaudeWatcher?
     private var usageFetcher: UsageFetcher?
     private var hookServer: HookServer?
+    private var focusMonitor: FocusMonitor?
     private var statusItem: NSStatusItem?
     private var toggleMenuItem: NSMenuItem?
     private var launchAtLoginMenuItem: NSMenuItem?
@@ -20,11 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let watcher = ClaudeWatcher()
         self.watcher = watcher
 
+        let focus = FocusMonitor()
+        self.focusMonitor = focus
+        focus.start()
+        watcher.focusMonitor = focus
+
         let usage = UsageFetcher()
         self.usageFetcher = usage
         usage.start()
 
-        let rootView = NotchView(watcher: watcher, usage: usage)
+        let rootView = NotchView(watcher: watcher, usage: usage, focusMonitor: focus)
         let hosting = NSHostingView(rootView: rootView)
         let fullHeight = NotchPanel.visibleContentHeight + NotchPanel.currentNotchHeight
         hosting.frame = NSRect(x: 0, y: 0, width: NotchPanel.panelWidth, height: fullHeight)

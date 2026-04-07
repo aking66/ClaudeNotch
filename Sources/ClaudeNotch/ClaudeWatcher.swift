@@ -139,6 +139,9 @@ struct ClaudeSession: Identifiable, Hashable {
 final class ClaudeWatcher: ObservableObject {
     @Published private(set) var sessions: [ClaudeSession] = []
 
+    /// Injected by AppDelegate so auto-expand can be suppressed when terminal is focused.
+    weak var focusMonitor: FocusMonitor?
+
     /// Incremented on every event that should auto-expand. Using a
     /// counter instead of a session-id string guarantees SwiftUI's
     /// onChange fires even when the same session triggers twice.
@@ -505,9 +508,14 @@ final class ClaudeWatcher: ObservableObject {
         }
 
         // Auto-expand the notch panel focused on THIS session.
+        // Suppress when terminal is focused (user already sees Claude output).
         if event.hookEventName == "PermissionRequest" || event.hookEventName == "Stop" {
-            autoExpandFocusedSession = sid
-            autoExpandCounter += 1
+            let suppress = focusMonitor?.isTerminalFocused == true
+                && event.hookEventName == "Stop"  // always expand for permissions
+            if !suppress {
+                autoExpandFocusedSession = sid
+                autoExpandCounter += 1
+            }
         }
 
         guard let newStatus = Self.statusFromHookEvent(event.hookEventName) else {
