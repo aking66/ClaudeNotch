@@ -71,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if result.added > 0 {
                 NSLog("ClaudeNotch: installed \(result.added) new hook(s)")
             }
+            try HookInstaller.installStatusLine()
         } catch {
             NSLog("ClaudeNotch: hook install failed: \(error)")
         }

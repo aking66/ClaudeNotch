@@ -46,6 +46,43 @@ enum HookInstaller {
         return "/Users/ahmed/ClaudeNotch/ClaudeNotch.app/Contents/Helpers/claudenotch-bridge"
     }
 
+    /// Path where the StatusLine script dumps rate_limits JSON.
+    static let rateLimitsFile = "/tmp/claudenotch-rl.json"
+
+    // MARK: - StatusLine
+
+    /// Inject our rate_limits extraction into the existing statusLine command.
+    /// Appends a one-liner that saves `.rate_limits` to a temp file on every
+    /// assistant message — zero API calls, free data.
+    static func installStatusLine() throws {
+        var settings = readSettings() ?? [:]
+        var sl = (settings["statusLine"] as? [String: Any]) ?? [:]
+        let existingCmd = (sl["command"] as? String) ?? ""
+
+        let marker = "# ClaudeNotch: rate_limits bridge"
+        if existingCmd.contains(marker) { return } // already installed
+
+        // Append our extraction after the existing command
+        let rlSnippet = "; \(marker)\n_rl=$(echo \"$input\" | jq -c '.rate_limits // empty' 2>/dev/null); [ -n \"$_rl\" ] && echo \"$_rl\" > \(rateLimitsFile)"
+
+        let newCmd: String
+        if existingCmd.isEmpty {
+            newCmd = "input=$(cat)\(rlSnippet)"
+        } else {
+            // The existing command likely starts with input=$(cat).
+            // Append our snippet at the end.
+            newCmd = existingCmd + rlSnippet
+        }
+
+        sl["command"] = newCmd
+        sl["type"] = "command"
+        settings["statusLine"] = sl
+
+        let _ = try backupCurrent()
+        try writeSettings(settings)
+        NSLog("ClaudeNotch: installed StatusLine rate_limits bridge")
+    }
+
     // MARK: - Public
 
     /// True if every event we want already has a claudenotch-bridge entry.

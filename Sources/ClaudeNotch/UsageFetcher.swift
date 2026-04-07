@@ -38,7 +38,7 @@ final class UsageFetcher: ObservableObject {
     /// Background refresh cadence. Tight enough to stay within a few
     /// percent of the live Anthropic counters without sharing the
     /// endpoint's rate limit with other menubar tools (Vibe Island etc.).
-    private let pollInterval: TimeInterval = 3 * 60
+    private let pollInterval: TimeInterval = 10 * 60  // 10 min — StatusLine file is primary now
 
     /// Minimum gap between any two attempts, regardless of trigger
     /// (hover, hook, background timer). Prevents a burst at launch when
@@ -53,8 +53,22 @@ final class UsageFetcher: ObservableObject {
     private var lastAttempt: Date?
     private var rateLimitedUntil: Date?
 
+    /// File watcher for rate_limits captured by StatusLine hook.
+    private var fileTimer: Timer?
+    private var lastFileModDate: Date?
+
     func start() {
-        Task { await self.fetch() }
+        // Try the local file first (instant, no API call).
+        readRateLimitsFile()
+        // Fall back to API if file doesn't exist yet.
+        if utilization == nil {
+            Task { await self.fetch() }
+        }
+        // Poll the rate_limits file every 5 seconds (free, no API).
+        fileTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.readRateLimitsFile() }
+        }
+        // API fallback: poll every 5 min (only if file hasn't updated).
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.fetch() }
         }
@@ -63,6 +77,75 @@ final class UsageFetcher: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        fileTimer?.invalidate()
+        fileTimer = nil
+    }
+
+    // MARK: - StatusLine file reader
+
+    /// Read rate_limits from /tmp/claudenotch-rl.json (written by StatusLine hook).
+    /// Format: {"primary_used_percent":40,"primary_resets_at":"ISO8601",
+    ///          "secondary_used_percent":41,"secondary_resets_at":"ISO8601"}
+    private func readRateLimitsFile() {
+        let url = URL(fileURLWithPath: HookInstaller.rateLimitsFile)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let modDate = attrs[.modificationDate] as? Date else { return }
+
+        // Skip if file hasn't changed since last read.
+        if let last = lastFileModDate, modDate <= last { return }
+        lastFileModDate = modDate
+
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+
+        // Map StatusLine rate_limits format → our Utilization struct.
+        // Format: {"five_hour":{"used_percentage":2,"resets_at":1775574000},
+        //          "seven_day":{"used_percentage":43,"resets_at":1775858400}}
+        let fiveHour: Utilization.Limit?
+        if let fh = json["five_hour"] as? [String: Any],
+           let pct = fh["used_percentage"] as? Double {
+            let resetsAt = Self.timestampToISO(fh["resets_at"])
+            fiveHour = Utilization.Limit(utilization: pct, resets_at: resetsAt)
+        } else {
+            fiveHour = nil
+        }
+
+        let sevenDay: Utilization.Limit?
+        if let sd = json["seven_day"] as? [String: Any],
+           let pct = sd["used_percentage"] as? Double {
+            let resetsAt = Self.timestampToISO(sd["resets_at"])
+            sevenDay = Utilization.Limit(utilization: pct, resets_at: resetsAt)
+        } else {
+            sevenDay = nil
+        }
+
+        if fiveHour != nil || sevenDay != nil {
+            self.utilization = Utilization(
+                five_hour: fiveHour,
+                seven_day: sevenDay,
+                seven_day_opus: nil,
+                seven_day_sonnet: nil,
+                extra_usage: nil
+            )
+            lastFetched = Date()
+            lastError = nil
+            NSLog("ClaudeNotch: rate_limits from StatusLine file: 5h=\(fiveHour?.utilization ?? -1)% 7d=\(sevenDay?.utilization ?? -1)%")
+        }
+    }
+
+    /// Convert a Unix timestamp (or ISO string) to ISO 8601 string.
+    private static func timestampToISO(_ value: Any?) -> String? {
+        if let ts = value as? Double {
+            let date = Date(timeIntervalSince1970: ts)
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime]
+            return f.string(from: date)
+        }
+        if let ts = value as? Int {
+            return timestampToISO(Double(ts))
+        }
+        return value as? String
     }
 
     /// Manually trigger a fetch — used on app launch and by any UI retry.
