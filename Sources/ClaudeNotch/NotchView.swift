@@ -803,7 +803,11 @@ struct NotchView: View {
                 }
             }
 
-            // Permission buttons matching Claude Code + Vibe Island
+            // Permission buttons: dynamic count based on tool type.
+            // Bash/Edit/Write → 3 buttons (no Always Allow — too dangerous).
+            // Other tools → 4 buttons (Always Allow available).
+            let dangerousTools: Set<String> = ["Bash", "Edit", "Write", "NotebookEdit"]
+            let showAlwaysAllow = !(dangerousTools.contains(session.currentTool?.name ?? "Bash"))
             HStack(spacing: 5) {
                 permButton("Deny",
                            bg: Color.white.opacity(0.1),
@@ -815,11 +819,13 @@ struct NotchView: View {
                            fg: .white.opacity(0.85),
                            decision: "allow",
                            sessionId: session.sessionID)
-                permButton("Always Allow  ⌥A",
-                           bg: Color.green.opacity(0.4),
-                           fg: .white,
-                           decision: "always_allow",
-                           sessionId: session.sessionID)
+                if showAlwaysAllow {
+                    permButton("Always Allow  ⌥A",
+                               bg: Color.green.opacity(0.4),
+                               fg: .white,
+                               decision: "always_allow",
+                               sessionId: session.sessionID)
+                }
                 permButton("Bypass",
                            bg: Color.red.opacity(0.5),
                            fg: .white,
