@@ -250,14 +250,17 @@ final class ClaudeWatcher: ObservableObject {
                 includingPropertiesForKeys: [.contentModificationDateKey]
             ) else { continue }
 
-            let jsonls = files.filter { $0.pathExtension == "jsonl" }
-            guard let latest = jsonls.max(by: { a, b in
-                Self.modDate(a) < Self.modDate(b)
-            }) else { continue }
+            // Filter: only UUID-named .jsonl (skip agent-*.jsonl subagent files)
+            let jsonls = files.filter {
+                $0.pathExtension == "jsonl" && !$0.lastPathComponent.hasPrefix("agent-")
+            }
 
-            let mod = Self.modDate(latest)
-            if mod > cutoff {
-                let tail = Self.parseTail(latest)
+            let projectName = Self.decodeProjectName(dir.lastPathComponent)
+            for jsonl in jsonls {
+                let mod = Self.modDate(jsonl)
+                guard mod > cutoff else { continue }
+
+                let tail = Self.parseTail(jsonl)
 
                 // Classify status from the parsed tail. Fall back to the
                 // previously known status on parse failures so we don't
@@ -266,7 +269,7 @@ final class ClaudeWatcher: ObservableObject {
                 let now = Date()
                 let status: SessionStatus
                 if parseFailed {
-                    status = lastStatus[latest] ?? .idle
+                    status = lastStatus[jsonl] ?? .idle
                 } else {
                     status = Self.classifyStatus(tail: tail, fileModifiedAt: mod, now: now,
                                                  approvalIdleThreshold: approvalIdleThreshold)
@@ -274,25 +277,25 @@ final class ClaudeWatcher: ObservableObject {
 
                 // Detect transitions and notify the user when a session
                 // finishes (busy → idle) or needs their attention.
-                let previous = lastStatus[latest]
+                let previous = lastStatus[jsonl]
                 if let previous, previous != status {
                     handleTransition(
                         from: previous, to: status,
-                        projectName: Self.decodeProjectName(dir.lastPathComponent)
+                        projectName: projectName
                     )
                 }
-                lastStatus[latest] = status
+                lastStatus[jsonl] = status
 
                 // Use cached values for expensive full-file scans.
                 // When cache is stale, serve stale data and refresh async.
-                let usage: UsageStats? = usageCache[latest]?.stats
-                let fileTasks: [TodoItem] = taskCache[latest]?.tasks ?? []
+                let usage: UsageStats? = usageCache[jsonl]?.stats
+                let fileTasks: [TodoItem] = taskCache[jsonl]?.tasks ?? []
 
                 // Schedule background refresh for stale caches.
-                let needsUsageRefresh = usageCache[latest]?.mtime != mod
-                let needsTaskRefresh = taskCache[latest]?.mtime != mod
+                let needsUsageRefresh = usageCache[jsonl]?.mtime != mod
+                let needsTaskRefresh = taskCache[jsonl]?.mtime != mod
                 if needsUsageRefresh || needsTaskRefresh {
-                    let url = latest
+                    let url = jsonl
                     let mtime = mod
                     DispatchQueue.global(qos: .utility).async {
                         let newUsage = needsUsageRefresh ? Self.parseUsage(url) : nil
@@ -313,8 +316,8 @@ final class ClaudeWatcher: ObservableObject {
                 let todos = tail.todos.isEmpty ? fileTasks : tail.todos
 
                 found.append(ClaudeSession(
-                    id: latest,
-                    projectName: Self.decodeProjectName(dir.lastPathComponent),
+                    id: jsonl,
+                    projectName: projectName,
                     lastModified: mod,
                     lastSnippet: tail.snippet,
                     assistantFull: tail.assistantFull,
@@ -674,9 +677,12 @@ final class ClaudeWatcher: ObservableObject {
             return .working
 
         case .compactBoundary:
-            // Compact just started — file is being rewritten.
+            // Compact boundary means context was compacted. If the file is
+            // still being written to (entries arriving after the boundary),
+            // Claude is actively compacting. Use a generous window since
+            // compaction can take several minutes on large contexts.
             let idleFor = now.timeIntervalSince(fileModifiedAt)
-            return idleFor < 60 ? .compacting : .idle
+            return idleFor < 300 ? .compacting : .idle
 
         case .unknown:
             return .idle

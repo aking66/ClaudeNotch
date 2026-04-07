@@ -18,7 +18,7 @@ struct NotchView: View {
     @State private var hoverCooldownUntil: Date = .distantPast
 
     /// Rows visible before the user taps "Show all N sessions".
-    private let defaultRowLimit = 3
+    private let defaultRowLimit = 8
 
     // Re-render clock so relative times update every second.
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -160,16 +160,11 @@ struct NotchView: View {
                 Text("Unavailable")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.35))
-            } else if let limit = usage.utilization?.five_hour {
+            } else if usage.utilization != nil {
                 Image(systemName: "sparkle")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 9, weight: .bold))
                     .foregroundColor(.orange)
-                Text("5h")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(.white)
-                Text(Self.formatPercent(limit.utilization))
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(Self.colorForUtilization(limit.utilization))
+                collapsedLimitSegment(label: "5h", limit: usage.utilization?.five_hour)
             } else if !watcher.sessions.isEmpty {
                 Text("\(watcher.sessions.count)")
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
@@ -339,6 +334,21 @@ struct NotchView: View {
                 .foregroundColor(.white.opacity(0.35))
             Text("—")
                 .foregroundColor(.white.opacity(0.25))
+        }
+    }
+
+    /// Compact version for the collapsed pill: "5h 2% 1h28m"
+    @ViewBuilder
+    private func collapsedLimitSegment(label: String, limit: Utilization.Limit?) -> some View {
+        let font = Font.system(size: 10, weight: .bold, design: .monospaced)
+        Text(label).font(font).foregroundColor(.white)
+        if let limit {
+            Text(Self.formatPercent(limit.utilization)).font(font)
+                .foregroundColor(Self.colorForUtilization(limit.utilization))
+            Text(Self.formatResetCountdown(limit.resets_at)).font(Font.system(size: 9, design: .monospaced))
+                .foregroundColor(.white.opacity(0.4))
+        } else {
+            Text("—%").font(font).foregroundColor(.white.opacity(0.35))
         }
     }
 
