@@ -101,7 +101,7 @@ struct NotchView: View {
                 let isPermission = session?.status == .awaitingApproval
                 if !isPermission {
                     let counter = watcher.autoExpandCounter
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                         if autoExpanded && watcher.autoExpandCounter == counter {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                                 isExpanded = false
@@ -112,12 +112,12 @@ struct NotchView: View {
                     }
                 }
             }
-            // Collapse when user switches to another app (non-terminal).
+            // Collapse when user switches app — but only for manual hovers,
+            // not for auto-expanded popups (those use their own timer).
             .onChange(of: focusMonitor.appSwitchCounter) { _ in
-                if isExpanded && autoExpanded {
+                if isExpanded && !autoExpanded {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                         isExpanded = false
-                        autoExpanded = false
                         focusedSessionId = nil
                     }
                 }
@@ -444,7 +444,15 @@ struct NotchView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(bgColor))
         .contentShape(Rectangle())
-        .onTapGesture { SessionLauncher.open(session) }
+        .onTapGesture {
+            SessionLauncher.open(session)
+            // Collapse panel after jumping to terminal
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                isExpanded = false
+                autoExpanded = false
+                focusedSessionId = nil
+            }
+        }
         .onHover { hovering in hoveredSessionID = hovering ? session.id : nil }
     }
 
@@ -465,7 +473,14 @@ struct NotchView: View {
             Spacer(minLength: 4)
 
             badge("Claude")
-            Button { SessionLauncher.open(session) } label: { badge("Terminal") }
+            Button {
+                SessionLauncher.open(session)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                    isExpanded = false
+                    autoExpanded = false
+                    focusedSessionId = nil
+                }
+            } label: { badge("Terminal") }
                 .buttonStyle(.plain)
             if let tokenText = formatTokens(session.usage?.contextTokens) {
                 badge(tokenText, tint: .cyan)
@@ -505,14 +520,16 @@ struct NotchView: View {
             toolBadge(tool)
         }
 
-        if !session.subagents.isEmpty {
-            subagentTree(session.subagents)
-        }
-
-        // Show tasks only if there are active (non-completed) ones.
+        // Tasks before subagents (matching Vibe Island layout)
         let activeTodos = session.todos.filter { $0.status != .completed }
         if !activeTodos.isEmpty {
             tasksList(session.todos)
+        }
+
+        // Show only running subagents + last completed one (not all history)
+        let visibleSubs = Self.filterSubagents(session.subagents)
+        if !visibleSubs.isEmpty {
+            subagentTree(visibleSubs)
         }
     }
 
@@ -562,9 +579,21 @@ struct NotchView: View {
 
     private func taskRow(_ todo: TodoItem) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: todo.status == .completed ? "checkmark.square.fill" : "square")
-                .font(.system(size: 11))
-                .foregroundColor(todo.status == .completed ? .blue.opacity(0.6) : .white.opacity(0.3))
+            // In-progress: blue dot, Completed: green checkbox, Pending: empty checkbox
+            switch todo.status {
+            case .inProgress:
+                Circle()
+                    .fill(Color.blue)
+                    .frame(width: 8, height: 8)
+            case .completed:
+                Image(systemName: "checkmark.square.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.blue.opacity(0.6))
+            case .pending:
+                Image(systemName: "square")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.3))
+            }
             Text(todo.content)
                 .font(.system(size: 11))
                 .foregroundColor(todo.status == .completed ? .white.opacity(0.35) : .white.opacity(0.7))
@@ -572,6 +601,17 @@ struct NotchView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
+    }
+
+    /// Filter subagents: show running ones + last completed.
+    private static func filterSubagents(_ subs: [Subagent]) -> [Subagent] {
+        let running = subs.filter { $0.status == .running }
+        let lastDone = subs.last(where: { $0.status == .done })
+        var result = running
+        if let done = lastDone, !running.contains(where: { $0.id == done.id }) {
+            result.append(done)
+        }
+        return result
     }
 
     /// Collapsible subagent tree: "⎇ Subagents (N)" header followed by
@@ -775,10 +815,19 @@ struct NotchView: View {
 
     /// Parse markdown string into AttributedString for rich rendering.
     private static func markdownText(_ raw: String) -> AttributedString {
+        var result: AttributedString
         if let md = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return md
+            result = md
+        } else {
+            result = AttributedString(raw)
         }
-        return AttributedString(raw)
+        // Force system font so markdown doesn't render everything as monospace.
+        let baseFont = NSFont.systemFont(ofSize: 11)
+        for run in result.runs {
+            let range = run.range
+            result[range].font = baseFont
+        }
+        return result
     }
 
     /// Full permission card matching Vibe Island's layout:

@@ -23,8 +23,47 @@ let socketPath: String = {
 }()
 
 // 1. Drain stdin. Claude Code writes a single JSON object then closes.
-let payload = FileHandle.standardInput.readDataToEndOfFile()
+var payload = FileHandle.standardInput.readDataToEndOfFile()
 guard !payload.isEmpty else { exit(0) }
+
+// 1b. Discover the TTY by walking the process tree up from our PID.
+//     Same approach as Vibe Island: ps -o tty=,ppid= -p PID, walk up.
+func discoverTTY() -> String? {
+    var walkPid = getpid()
+    for _ in 0..<10 {  // max 10 levels up
+        let task = Process()
+        let pipe = Pipe()
+        task.launchPath = "/bin/ps"
+        task.arguments = ["-o", "tty=,ppid=", "-p", "\(walkPid)"]
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do { try task.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else { return nil }
+        let parts = output.split(separator: " ", maxSplits: 1).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let tty = parts[0]
+        let ppid = Int32(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
+        if ppid <= 1 { break }
+        if tty != "??" && tty != "?" && !tty.isEmpty {
+            return tty
+        }
+        walkPid = ppid
+    }
+    return nil
+}
+
+// Inject the discovered TTY into the JSON payload.
+if var obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] {
+    if let tty = discoverTTY() {
+        obj["_bridge_tty"] = tty
+        if let updated = try? JSONSerialization.data(withJSONObject: obj) {
+            payload = updated
+        }
+    }
+}
 
 // Detect if this is a PermissionRequest (needs a blocking response).
 let isPermissionRequest: Bool = {

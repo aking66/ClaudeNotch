@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel?
     private var watcher: ClaudeWatcher?
     private var usageFetcher: UsageFetcher?
-    private var hookServer: HookServer?
+    var hookServer: HookServer?
     private var focusMonitor: FocusMonitor?
     private var statusItem: NSStatusItem?
     private var toggleMenuItem: NSMenuItem?

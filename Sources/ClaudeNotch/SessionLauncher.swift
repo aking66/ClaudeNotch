@@ -9,14 +9,41 @@ enum SessionLauncher {
 
     static func open(_ session: ClaudeSession) {
         let targetCwd = resolveCwd(for: session)
+        let sid = session.sessionID
 
-        if let tty = findTTY(forCwd: targetCwd) {
-            if focusTerminalTab(tty: tty) {
-                return
+        CNLog.log("JUMP: session=\(sid) cwd=\(targetCwd)")
+
+        // Try 1: use the known TTY from hook events (most precise).
+        if let server = (NSApp.delegate as? AppDelegate)?.hookServer {
+            let allTTYs = server.sessionTTY
+            CNLog.log("JUMP: sessionTTY map has \(allTTYs.count) entries: \(allTTYs)")
+            if let tty = allTTYs[sid] {
+                CNLog.log("JUMP: found hook TTY=\(tty) for session \(sid)")
+                if focusTerminalTab(tty: tty) {
+                    CNLog.log("JUMP: SUCCESS via hook TTY")
+                    return
+                }
+                CNLog.log("JUMP: hook TTY failed to focus")
+            } else {
+                CNLog.log("JUMP: no hook TTY for session \(sid)")
             }
         }
 
+        // Try 2: find by TTY of a claude process with matching CWD.
+        CNLog.log("JUMP: trying findTTY for cwd=\(targetCwd)")
+        if let tty = findTTY(forCwd: targetCwd) {
+            CNLog.log("JUMP: found process TTY=\(tty)")
+            if focusTerminalTab(tty: tty) {
+                CNLog.log("JUMP: SUCCESS via process TTY")
+                return
+            }
+            CNLog.log("JUMP: process TTY failed to focus")
+        } else {
+            CNLog.log("JUMP: no process TTY found")
+        }
+
         // Fallback: open a fresh Terminal window at the project directory.
+        CNLog.log("JUMP: FALLBACK opening new terminal at \(targetCwd)")
         openNewTerminal(at: targetCwd)
     }
 
@@ -142,6 +169,31 @@ enum SessionLauncher {
     }
 
     // MARK: - AppleScript focus
+
+    /// Find and focus a Terminal tab whose name contains the given string.
+    /// More reliable than TTY matching when multiple sessions share a CWD.
+    private static func focusTerminalTabByTitle(containing text: String) -> Bool {
+        let escaped = text.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Terminal"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if name of t contains "\(escaped)" then
+                        set frontmost of w to true
+                        set selected of t to true
+                        activate
+                        return "ok"
+                    end if
+                end repeat
+            end repeat
+            return "notfound"
+        end tell
+        """
+        var errorInfo: NSDictionary?
+        guard let apple = NSAppleScript(source: script) else { return false }
+        let result = apple.executeAndReturnError(&errorInfo)
+        return result.stringValue == "ok"
+    }
 
     /// Drive Terminal.app to select the tab whose tty matches "/dev/<tty>".
     /// Returns true iff a matching tab was found and focused.

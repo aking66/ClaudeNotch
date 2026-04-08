@@ -27,6 +27,10 @@ final class HookServer {
     /// waiting for a decision from the UI. Keyed by session_id.
     private var pendingApprovals: [String: Int32] = [:]
 
+    /// TTY per session, discovered from the bridge process's parent.
+    /// Used to focus the correct terminal tab.
+    private(set) var sessionTTY: [String: String] = [:]
+
     init(handler: @escaping (Event) -> Void) {
         self.handler = handler
     }
@@ -203,6 +207,15 @@ final class HookServer {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
+                // Store TTY from bridge (injected as _bridge_tty by the bridge process).
+                if let sid = event.sessionId,
+                   let tty = event.raw["_bridge_tty"] as? String, !tty.isEmpty {
+                    if self.sessionTTY[sid] == nil {
+                        self.sessionTTY[sid] = tty
+                        CNLog.log("TTY from bridge: session=\(sid) tty=\(tty)")
+                    }
+                }
+
                 if isPermission, let sid = event.sessionId {
                     // Close any stale pending fd for this session before
                     // storing the new one (e.g. user cancelled and retried).
@@ -270,5 +283,62 @@ final class HookServer {
             permissionSuggestions: (obj["permission_suggestions"] as? [[String: Any]]) ?? [],
             raw: obj
         )
+    }
+
+    /// Find all TTYs for claude processes with the given CWD, then pick
+    /// one that isn't already assigned to another session.
+    private static func discoverTTYForSession(sessionId: String, cwd: String) -> String? {
+        // Find ALL claude processes with matching CWD
+        guard let psOutput = runSync("/bin/ps", ["-axo", "pid=,tty=,command="]) else { return nil }
+        let normalizedCwd = (cwd as NSString).standardizingPath
+        var candidateTTYs: [String] = []
+
+        for line in psOutput.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let parts = trimmed.split(separator: " ", maxSplits: 2).map(String.init)
+            guard parts.count >= 3 else { continue }
+            let pid = Int(parts[0]) ?? 0
+            let tty = parts[1]
+            let command = parts[2]
+
+            let isClaudeCLI = command.contains("/bin/claude") && !command.contains("browser-agent") && !command.contains("ClaudeNotch") && !command.contains("vibe-island")
+            guard isClaudeCLI, tty != "?", tty != "??" else { continue }
+
+            // Check CWD
+            if let pidCwd = runSync("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]) {
+                for cwdLine in pidCwd.split(separator: "\n") {
+                    if cwdLine.hasPrefix("n") {
+                        let processCwd = (String(cwdLine.dropFirst()) as NSString).standardizingPath
+                        if processCwd == normalizedCwd {
+                            candidateTTYs.append(tty)
+                        }
+                    }
+                }
+            }
+        }
+
+        CNLog.log("TTY discovery for \(sessionId): found \(candidateTTYs.count) candidates: \(candidateTTYs)")
+
+        // If only one candidate, use it
+        if candidateTTYs.count == 1 { return candidateTTYs[0] }
+        if candidateTTYs.isEmpty { return nil }
+
+        // Multiple candidates — return the first that hasn't been claimed
+        // by another session. This is a best-effort heuristic.
+        // (Runs on background queue, reads sessionTTY on main would need sync.)
+        return candidateTTYs.first
+    }
+
+    private nonisolated static func runSync(_ path: String, _ args: [String]) -> String? {
+        let task = Process()
+        let pipe = Pipe()
+        task.launchPath = path
+        task.arguments = args
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do { try task.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return String(data: data, encoding: .utf8)
     }
 }
