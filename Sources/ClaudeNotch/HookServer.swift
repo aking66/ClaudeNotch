@@ -15,6 +15,7 @@ final class HookServer {
         let transcriptPath: String?        // absolute path to the .jsonl
         let toolName: String?              // tool_use events
         let toolInput: [String: Any]?      // tool parameters (PreToolUse)
+        let permissionSuggestions: [[String: Any]]  // PermissionRequest only
         let raw: [String: Any]             // full payload for future use
     }
 
@@ -266,6 +267,7 @@ final class HookServer {
             transcriptPath: obj["transcript_path"] as? String,
             toolName: obj["tool_name"] as? String,
             toolInput: obj["tool_input"] as? [String: Any],
+            permissionSuggestions: (obj["permission_suggestions"] as? [[String: Any]]) ?? [],
             raw: obj
         )
     }

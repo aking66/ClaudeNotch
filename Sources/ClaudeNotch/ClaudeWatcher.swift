@@ -43,6 +43,7 @@ struct CurrentTool: Hashable {
     let detail: String?       // a short summary of the tool input
     let description: String?  // human description from tool_input.description
     let diffPreview: DiffPreview?  // code changes for Edit/Write tools
+    let hasAlwaysAllow: Bool  // true if permission_suggestions is non-empty
 }
 
 /// A subagent spawned by the Agent tool within a parent session.
@@ -274,12 +275,18 @@ final class ClaudeWatcher: ObservableObject {
                 // flicker to idle when a giant entry overflows the buffer.
                 let parseFailed = (tail.cwd == nil && tail.snippet == nil && tail.lastEntryKind == .unknown)
                 let now = Date()
-                let status: SessionStatus
+                var status: SessionStatus
                 if parseFailed {
                     status = lastStatus[jsonl] ?? .idle
                 } else {
                     status = Self.classifyStatus(tail: tail, fileModifiedAt: mod, now: now,
                                                  approvalIdleThreshold: approvalIdleThreshold)
+                }
+                // Detect interrupted sessions: snippet contains "[Request interrupted"
+                if status == .idle,
+                   let snippet = tail.snippet,
+                   snippet.contains("[Request interrupted") || snippet.contains("Interrupted") {
+                    status = .interrupted
                 }
 
                 // Detect transitions and notify the user when a session
@@ -395,7 +402,8 @@ final class ClaudeWatcher: ObservableObject {
                         input: event.toolInput
                     ),
                     description: desc,
-                    diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput)
+                    diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput),
+                    hasAlwaysAllow: false
                 )
             }
         case "PostToolUse":
@@ -469,7 +477,8 @@ final class ClaudeWatcher: ObservableObject {
                 name: name,
                 detail: Self.describeToolInput(toolName: name, input: event.toolInput),
                 description: desc,
-                diffPreview: nil
+                diffPreview: nil,
+                hasAlwaysAllow: false
             )
             sessionSubagents[sid] = subs
         }
@@ -528,7 +537,8 @@ final class ClaudeWatcher: ObservableObject {
                 name: name,
                 detail: Self.describeToolInput(toolName: name, input: event.toolInput),
                 description: desc,
-                diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput)
+                diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput),
+                hasAlwaysAllow: !event.permissionSuggestions.isEmpty
             )
         }
 
@@ -641,8 +651,13 @@ final class ClaudeWatcher: ObservableObject {
             return .working
         case "PermissionRequest":
             return .awaitingApproval
+        case "PreCompact":
+            return .compacting
         case "Stop", "SessionEnd":
             return .idle
+        // Any other event clears stuck compacting/approval states.
+        case "Notification", "SubagentStart", "SubagentStop":
+            return .working
         default:
             return nil
         }
@@ -656,9 +671,13 @@ final class ClaudeWatcher: ObservableObject {
         let now = Date()
         let merged = baseSessions.values.map { session -> ClaudeSession in
             var result = session
-            if let hook = hookStatus[session.sessionID],
-               now.timeIntervalSince(hook.at) < hookStatusTTL {
-                result = result.with(status: hook.status)
+            if let hook = hookStatus[session.sessionID] {
+                let age = now.timeIntervalSince(hook.at)
+                // Compacting gets a shorter TTL (5 min) since it can be cancelled.
+                let ttl = hook.status == .compacting ? 300.0 : hookStatusTTL
+                if age < ttl {
+                    result = result.with(status: hook.status)
+                }
             }
             if let tool = currentTools[session.sessionID] {
                 result = result.with(currentTool: tool)
@@ -714,8 +733,7 @@ final class ClaudeWatcher: ObservableObject {
     // MARK: - Notifications
 
     /// React to a session status change. Fires a user notification and
-    /// plays an audio cue on the two transitions that matter most:
-    /// completion and approval-wait.
+    /// plays a sound from the Clean Chimes pack.
     private func handleTransition(
         from previous: SessionStatus,
         to current: SessionStatus,
@@ -723,15 +741,13 @@ final class ClaudeWatcher: ObservableObject {
     ) {
         // Completion: something was happening, now idle.
         if previous.isBusy && current == .idle {
-            postNotification(title: "Claude finished", body: projectName, sound: true)
-            NSSound(named: "Hero")?.play()
+            postNotification(title: "Claude finished", body: projectName, sound: false)
             return
         }
 
         // New approval request (either fresh start or transition from working).
         if current == .awaitingApproval && previous != .awaitingApproval {
-            postNotification(title: "Claude needs approval", body: projectName, sound: true)
-            NSSound(named: "Glass")?.play()
+            postNotification(title: "Claude needs approval", body: projectName, sound: false)
         }
     }
 

@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let server = HookServer { [weak watcher, weak usage] event in
             NSLog("ClaudeNotch hook: \(event.hookEventName) session=\(event.sessionId ?? "?") tool=\(event.toolName ?? "-")")
             watcher?.applyHookEvent(event)
+            SoundManager.shared.playForEvent(event.hookEventName, toolName: event.toolName)
 
             if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
                 usage?.refreshIfStale(maxAge: 30)

@@ -31,12 +31,9 @@ struct NotchView: View {
     private let collapsedWidth: CGFloat = 300
     private let collapsedContentHeight: CGFloat = 30
     private let expandedWidth: CGFloat = 560
-    private let expandedContentHeight: CGFloat = 360
+    private let maxExpandedContentHeight: CGFloat = 400
 
     private var currentWidth: CGFloat { isExpanded ? expandedWidth : collapsedWidth }
-    private var currentHeight: CGFloat {
-        (isExpanded ? expandedContentHeight : collapsedContentHeight) + notchInset
-    }
 
     // MARK: - Body
 
@@ -50,7 +47,9 @@ struct NotchView: View {
                     .padding(.horizontal, isExpanded ? 18 : 16)
                     .padding(.bottom, isExpanded ? 14 : 8)
             }
-            .frame(width: currentWidth, height: currentHeight)
+            .frame(width: currentWidth)
+            .frame(maxHeight: isExpanded ? maxExpandedContentHeight + notchInset : collapsedContentHeight + notchInset)
+            .fixedSize(horizontal: false, vertical: true)
             .overlay(alignment: .top) {
                 if isExpanded {
                     HStack {
@@ -803,11 +802,7 @@ struct NotchView: View {
                 }
             }
 
-            // Permission buttons: dynamic count based on tool type.
-            // Bash/Edit/Write → 3 buttons (no Always Allow — too dangerous).
-            // Other tools → 4 buttons (Always Allow available).
-            let dangerousTools: Set<String> = ["Bash", "Edit", "Write", "NotebookEdit"]
-            let showAlwaysAllow = !(dangerousTools.contains(session.currentTool?.name ?? "Bash"))
+            // Permission buttons: dynamic based on permission_suggestions
             HStack(spacing: 5) {
                 permButton("Deny",
                            bg: Color.white.opacity(0.1),
@@ -819,8 +814,8 @@ struct NotchView: View {
                            fg: .white.opacity(0.85),
                            decision: "allow",
                            sessionId: session.sessionID)
-                if showAlwaysAllow {
-                    permButton("Always Allow  ⌥A",
+                if session.currentTool?.hasAlwaysAllow == true {
+                    permButton("Always Allow",
                                bg: Color.green.opacity(0.4),
                                fg: .white,
                                decision: "always_allow",

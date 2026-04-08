@@ -21,6 +21,11 @@ cp ".build/release/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp ".build/release/ClaudeNotchBridge" "${APP_BUNDLE}/Contents/Helpers/claudenotch-bridge"
 cp "Resources/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"
 
+# Copy sound pack into Resources.
+if [ -d "Resources/Sounds" ]; then
+    cp -R "Resources/Sounds" "${APP_BUNDLE}/Contents/Resources/Sounds"
+fi
+
 # Ad-hoc sign so Gatekeeper lets it run locally.
 codesign --force --deep --sign - "${APP_BUNDLE}" >/dev/null 2>&1 || true
 
