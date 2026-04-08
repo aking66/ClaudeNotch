@@ -94,6 +94,12 @@ struct ClaudeSession: Identifiable, Hashable {
     /// Convenience for call sites that just want "is something happening".
     var isWorking: Bool { status == .working }
 
+    /// True if the session was recently active (file modified < 20 min).
+    /// Inactive sessions display as compact single-line rows.
+    var isRecentlyActive: Bool {
+        Date().timeIntervalSince(lastModified) < 20 * 60
+    }
+
     /// Session UUID extracted from the jsonl filename, e.g.
     /// "2f627212-805d-4117-b41b-41dddd6f10a1" from "…/<uuid>.jsonl".
     /// Matches the `session_id` field in hook event payloads.
@@ -151,7 +157,7 @@ final class ClaudeWatcher: ObservableObject {
     var autoExpandFocusedSession: String?
 
     private var timer: Timer?
-    private let activeWindow: TimeInterval = 20 * 60  // 20 min — shows only actively running sessions
+    private let activeWindow: TimeInterval = 48 * 60 * 60  // 48 hours — show all recent, UI handles compact display
 
     /// Cache parsed usage per session file. Keyed by URL, value includes the
     /// file mtime at parse time so we can invalidate cheaply.
@@ -229,6 +235,11 @@ final class ClaudeWatcher: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+    }
+
+    /// Check if a session is known alive via hook events.
+    func isSessionHookAlive(_ sessionID: String) -> Bool {
+        hookAliveSessions[sessionID] != nil
     }
 
     private func refresh() {

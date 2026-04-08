@@ -405,23 +405,52 @@ struct NotchView: View {
     private func sessionRow(_ session: ClaudeSession) -> some View {
         let isHovered = hoveredSessionID == session.id
         let bgColor: Color = isHovered ? Color.white.opacity(0.06) : Color.clear
-        return HStack(alignment: .top, spacing: 10) {
-            PixelAvatar(status: session.status)
-                .padding(.top, 2)
+        let isActive = session.isRecentlyActive || hookAliveSessions(session)
 
-            VStack(alignment: .leading, spacing: 3) {
-                sessionRowHeader(session)
-                sessionRowBody(session)
-                statusLabel(for: session)
+        return Group {
+            if isActive {
+                // Full row for active sessions
+                HStack(alignment: .top, spacing: 10) {
+                    PixelAvatar(status: session.status)
+                        .padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 3) {
+                        sessionRowHeader(session)
+                        sessionRowBody(session)
+                        statusLabel(for: session)
+                    }
+                }
+            } else {
+                // Compact single-line for inactive sessions
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color.white.opacity(0.25))
+                        .frame(width: 5, height: 5)
+                    Text(sessionTitle(session))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.5))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    badge("Claude")
+                    badge("Terminal")
+                    Text(relativeTime(session.lastModified))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                }
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, isActive ? 6 : 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(bgColor))
         .contentShape(Rectangle())
         .onTapGesture { SessionLauncher.open(session) }
         .onHover { hovering in hoveredSessionID = hovering ? session.id : nil }
+    }
+
+    /// Check if session is tracked as alive via hooks.
+    private func hookAliveSessions(_ session: ClaudeSession) -> Bool {
+        watcher.isSessionHookAlive(session.sessionID)
     }
 
     /// Top line of a session row: title + badges + terminal button + archive.
@@ -480,7 +509,9 @@ struct NotchView: View {
             subagentTree(session.subagents)
         }
 
-        if !session.todos.isEmpty {
+        // Show tasks only if there are active (non-completed) ones.
+        let activeTodos = session.todos.filter { $0.status != .completed }
+        if !activeTodos.isEmpty {
             tasksList(session.todos)
         }
     }
