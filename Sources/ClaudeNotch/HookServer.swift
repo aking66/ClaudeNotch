@@ -39,6 +39,10 @@ final class HookServer {
     /// When each pending approval was stored, for timeout-based cleanup.
     private var pendingApprovalTimes: [String: Date] = [:]
 
+    /// Counter per session, incremented on each new PermissionRequest.
+    /// Used to ensure the 10s fallback timer doesn't clear a NEWER permission.
+    private var permissionGeneration: [String: Int] = [:]
+
     /// TTY per session, discovered from the bridge process's parent.
     /// Used to focus the correct terminal tab.
     private(set) var sessionTTY: [String: String] = [:]
@@ -248,17 +252,22 @@ final class HookServer {
         // Safety net: if PostToolUse doesn't arrive within 10s, the bridge
         // was already gone and the status is stuck. Clear it so the UI
         // doesn't show a stale permission card forever.
+        // Capture the current generation so we don't kill a NEWER permission.
         let sid = sessionId
+        let gen = permissionGeneration[sid, default: 0]
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-            self?.clearStaleAwaitingApproval(sessionId: sid)
+            guard let self else { return }
+            // Only clear if no new PermissionRequest arrived since we resolved.
+            let currentGen = self.permissionGeneration[sid, default: 0]
+            if currentGen == gen {
+                self.clearStaleAwaitingApproval(sessionId: sid)
+            }
         }
     }
 
     /// If a session is still awaitingApproval 10s after we resolved it,
     /// the bridge never relayed our answer. Force-clear the status.
     private func clearStaleAwaitingApproval(sessionId: String) {
-        // Only act if the handler (AppDelegate) exposes the watcher.
-        // We notify via a callback so HookServer stays decoupled.
         staleApprovalCallback?(sessionId)
     }
 
@@ -341,6 +350,7 @@ final class HookServer {
                     self.pendingApprovals[sid] = clientFd
                     self.hadPendingApproval.insert(sid)
                     self.pendingApprovalTimes[sid] = Date()
+                    self.permissionGeneration[sid, default: 0] += 1
                     CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(event.toolName ?? "-")")
                 }
 
