@@ -72,8 +72,10 @@ struct NotchView: View {
                 if hovering && Date() < hoverCooldownUntil { return }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                     if hovering {
+                        CNLog.ui("hover expand")
                         isExpanded = true
                     } else if !autoExpanded {
+                        CNLog.ui("hover collapse")
                         isExpanded = false
                         hoverCooldownUntil = Date().addingTimeInterval(0.5)
                     }
@@ -103,6 +105,7 @@ struct NotchView: View {
                     let counter = watcher.autoExpandCounter
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                         if autoExpanded && watcher.autoExpandCounter == counter {
+                            CNLog.ui("auto-expand timer collapse")
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                                 isExpanded = false
                                 autoExpanded = false
@@ -116,6 +119,7 @@ struct NotchView: View {
             // not for auto-expanded popups (those use their own timer).
             .onChange(of: focusMonitor.appSwitchCounter) { _ in
                 if isExpanded && !autoExpanded {
+                    CNLog.ui("app-switch collapse")
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                         isExpanded = false
                         focusedSessionId = nil

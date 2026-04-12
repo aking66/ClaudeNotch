@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let server = HookServer { [weak watcher, weak usage] event in
             let sid = event.sessionId ?? "?"
             let tool = event.toolName ?? "-"
-            CNLog.hook("\(event.hookEventName) session=\(sid) tool=\(tool)")
+            CNLog.hook("\(event.hookEventName) session=\(CNLog.sessionLabel(sid)) tool=\(tool)")
             if let input = event.toolInput, !input.isEmpty {
                 let detail = ClaudeWatcher.describeToolInput(toolName: tool, input: event.toolInput) ?? ""
                 if !detail.isEmpty { CNLog.tool("\(tool): \(detail)") }
@@ -129,6 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let diag = NSMenuItem(
+            title: "Run Diagnostics",
+            action: #selector(runDiagnostics),
+            keyEquivalent: "d"
+        )
+        diag.target = self
+        menu.addItem(diag)
+
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit ClaudeNotch",
             action: #selector(quitApp),
@@ -150,6 +160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.orderFrontRegardless()
             toggleMenuItem?.title = "Hide Notch"
         }
+    }
+
+    @objc private func runDiagnostics() {
+        watcher?.simulateBugScenarios()
+        // Open the log file so user can see results immediately.
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/tmp/claudenotch.log"))
     }
 
     @objc private func quitApp() {

@@ -275,7 +275,7 @@ final class ClaudeWatcher: ObservableObject {
             for jsonl in jsonls {
                 let mod = Self.modDate(jsonl)
                 let sessionID = jsonl.deletingPathExtension().lastPathComponent
-                // Show if recently modified OR known alive via hooks.
+                CNLog.registerSession(id: sessionID, name: projectName)
                 let isHookAlive = hookAliveSessions[sessionID] != nil
                 guard mod > cutoff || isHookAlive else { continue }
 
@@ -391,13 +391,15 @@ final class ClaudeWatcher: ObservableObject {
         if event.hookEventName == "SessionStart" {
             if let path = event.transcriptPath {
                 hookAliveSessions[sid] = path
+                CNLog.session("alive +\(CNLog.sessionLabel(sid)) via SessionStart")
             }
         } else if event.hookEventName == "SessionEnd" {
             hookAliveSessions.removeValue(forKey: sid)
+            CNLog.session("alive -\(CNLog.sessionLabel(sid)) via SessionEnd")
         }
-        // Any hook event from a session means it's alive.
         if hookAliveSessions[sid] == nil, let path = event.transcriptPath {
             hookAliveSessions[sid] = path
+            CNLog.session("alive +\(CNLog.sessionLabel(sid)) via \(event.hookEventName)")
         }
 
         // Track the in-flight tool per session so the UI can show a
@@ -407,7 +409,7 @@ final class ClaudeWatcher: ObservableObject {
             if let name = event.toolName {
                 let desc = event.toolInput?["description"] as? String
                 let detail = Self.describeToolInput(toolName: name, input: event.toolInput)
-                CNLog.tool("PreToolUse: \(name) \(detail ?? "") session=\(sid)")
+                CNLog.tool("PreToolUse: \(name) \(detail ?? "") session=\(CNLog.sessionLabel(sid))")
                 currentTools[sid] = CurrentTool(
                     name: name,
                     detail: detail,
@@ -417,7 +419,7 @@ final class ClaudeWatcher: ObservableObject {
                 )
             }
         case "PostToolUse":
-            CNLog.tool("PostToolUse: \(event.toolName ?? "-") session=\(sid)")
+            CNLog.tool("PostToolUse: \(event.toolName ?? "-") session=\(CNLog.sessionLabel(sid))")
             break  // Keep showing last tool
         case "Stop", "SessionEnd":
             break  // Keep showing last tool even when idle
@@ -437,7 +439,7 @@ final class ClaudeWatcher: ObservableObject {
             let desc = event.raw["description"] as? String
                 ?? event.toolInput?["description"] as? String
                 ?? pendingAgentDesc[sid]
-            CNLog.sub("START: id=\(subId) type=\(agentType) desc=\(desc ?? "-") session=\(sid)")
+            CNLog.sub("START: id=\(subId) type=\(agentType) desc=\(desc ?? "-") session=\(CNLog.sessionLabel(sid))")
             pendingAgentType.removeValue(forKey: sid)
             pendingAgentDesc.removeValue(forKey: sid)
             let sub = Subagent(
@@ -454,7 +456,7 @@ final class ClaudeWatcher: ObservableObject {
 
         case "SubagentStop":
             let subId = event.raw["subagent_id"] as? String ?? ""
-            CNLog.sub("STOP: id=\(subId) session=\(sid)")
+            CNLog.sub("STOP: id=\(subId) session=\(CNLog.sessionLabel(sid))")
             if var subs = sessionSubagents[sid] {
                 if let idx = subs.firstIndex(where: { $0.id == subId }) {
                     subs[idx].status = .done
@@ -521,13 +523,13 @@ final class ClaudeWatcher: ObservableObject {
                     return TodoItem(id: content, content: content, status: status)
                 }
                 if !todos.isEmpty {
-                    CNLog.task("TodoWrite: \(todos.count) items session=\(sid)")
+                    CNLog.task("TodoWrite: \(todos.count) items session=\(CNLog.sessionLabel(sid))")
                     sessionTodos[sid] = todos
                 }
             }
 
             if name == "TaskCreate" || name == "TaskUpdate" {
-                CNLog.task("\(name) session=\(sid)")
+                CNLog.task("\(name) session=\(CNLog.sessionLabel(sid))")
                 // Find the session URL to invalidate its task cache.
                 if let url = baseSessions.values.first(where: { $0.sessionID == sid })?.id {
                     taskCache.removeValue(forKey: url)
@@ -546,7 +548,7 @@ final class ClaudeWatcher: ObservableObject {
         if event.hookEventName == "PermissionRequest", let name = event.toolName {
             let desc = event.toolInput?["description"] as? String
             let hasAlways = !event.permissionSuggestions.isEmpty
-            CNLog.perm("PermissionRequest: tool=\(name) hasAlwaysAllow=\(hasAlways) session=\(sid)")
+            CNLog.perm("PermissionRequest: tool=\(name) hasAlwaysAllow=\(hasAlways) session=\(CNLog.sessionLabel(sid))")
             currentTools[sid] = CurrentTool(
                 name: name,
                 detail: Self.describeToolInput(toolName: name, input: event.toolInput),
@@ -561,7 +563,7 @@ final class ClaudeWatcher: ObservableObject {
         // Stop (completion): suppress only when THIS session's terminal
         // tab is active (user already sees the output).
         if event.hookEventName == "PermissionRequest" {
-            CNLog.ui("auto-expand: PermissionRequest session=\(sid)")
+            CNLog.ui("auto-expand: PermissionRequest session=\(CNLog.sessionLabel(sid))")
             autoExpandFocusedSession = sid
             autoExpandCounter += 1
         } else if event.hookEventName == "Stop" {
@@ -570,11 +572,11 @@ final class ClaudeWatcher: ObservableObject {
                 && sessionCwd != nil
                 && SessionLauncher.isSessionTerminalActive(cwd: sessionCwd!)
             if !isThisSessionFocused {
-                CNLog.ui("auto-expand: Stop session=\(sid) (terminal not focused)")
+                CNLog.ui("auto-expand: Stop session=\(CNLog.sessionLabel(sid)) (terminal not focused)")
                 autoExpandFocusedSession = sid
                 autoExpandCounter += 1
             } else {
-                CNLog.ui("suppressed: Stop session=\(sid) (terminal focused)")
+                CNLog.ui("suppressed: Stop session=\(CNLog.sessionLabel(sid)) (terminal focused)")
             }
         }
 
@@ -587,10 +589,10 @@ final class ClaudeWatcher: ObservableObject {
 
         // Don't let Notification/SubagentStart/SubagentStop override
         // awaitingApproval — a pending permission prompt is still open.
-        if previousStatus == .awaitingApproval && newStatus == .working {
+        if (previousStatus == .awaitingApproval || previousStatus == .idle) && newStatus == .working {
             let isRealWork = ["UserPromptSubmit", "PreToolUse", "PostToolUse"].contains(event.hookEventName)
             if !isRealWork {
-                CNLog.state("blocked \(event.hookEventName) from overriding awaitingApproval session=\(sid)")
+                CNLog.state("blocked \(event.hookEventName) from overriding \(previousStatus!.rawValue) session=\(CNLog.sessionLabel(sid))")
                 rebuildPublishedSessions()
                 return
             }
@@ -599,7 +601,7 @@ final class ClaudeWatcher: ObservableObject {
         hookStatus[sid] = (newStatus, Date())
 
         if previousStatus != newStatus {
-            CNLog.state("\(previousStatus?.rawValue ?? "nil") → \(newStatus.rawValue) session=\(sid)")
+            CNLog.state("\(previousStatus?.rawValue ?? "nil") → \(newStatus.rawValue) session=\(CNLog.sessionLabel(sid))")
         }
 
         // Fire user notifications on the meaningful transitions.
@@ -712,9 +714,12 @@ final class ClaudeWatcher: ObservableObject {
                 let isFinal = hook.status == .idle || hook.status == .interrupted
                 let ttl = isFinal ? Double.infinity : (hook.status == .compacting ? 300.0 : hookStatusTTL)
                 if age < ttl {
+                    if hook.status != session.status {
+                        CNLog.state("hook \(hook.status.rawValue) overrides poll \(session.status.rawValue) for \(CNLog.sessionLabel(session.sessionID))")
+                    }
                     result = result.with(status: hook.status)
                 } else {
-                    CNLog.state("hookStatus expired: \(hook.status.rawValue) age=\(Int(age))s session=\(session.sessionID)")
+                    CNLog.state("hookStatus expired: \(hook.status.rawValue) age=\(Int(age))s session=\(CNLog.sessionLabel(session.sessionID))")
                 }
             }
             if let tool = currentTools[session.sessionID] {
@@ -1217,5 +1222,86 @@ final class ClaudeWatcher: ObservableObject {
             }
         }
         return "~/" + s.replacingOccurrences(of: "-", with: "/")
+    }
+
+    // MARK: - Diagnostic simulation
+
+    /// Injects fake hook events to verify the state machine and logging
+    /// catch known bug patterns. Results appear in /tmp/claudenotch.log
+    /// under the [SIM] category.
+    func simulateBugScenarios() {
+        let simSid = "sim-\(UUID().uuidString.prefix(8))"
+        CNLog.registerSession(id: simSid, name: "diagnostic")
+
+        // Helper to build a fake event.
+        func fakeEvent(_ name: String, tool: String? = nil) -> HookServer.Event {
+            HookServer.Event(
+                hookEventName: name,
+                sessionId: simSid,
+                cwd: "/tmp/sim",
+                transcriptPath: nil,
+                toolName: tool,
+                toolInput: nil,
+                permissionSuggestions: [],
+                raw: ["hook_event_name": name, "session_id": simSid]
+            )
+        }
+
+        CNLog.sim("========== DIAGNOSTIC START ==========")
+
+        // --- Scenario A: Notification must NOT override awaitingApproval ---
+        CNLog.sim("Scenario A: Notification vs awaitingApproval")
+        hookStatus[simSid] = nil
+        applyHookEvent(fakeEvent("PreToolUse", tool: "Bash"))
+        applyHookEvent(fakeEvent("PermissionRequest", tool: "Bash"))
+        let stateBeforeA = hookStatus[simSid]?.status
+        CNLog.sim("  before Notification: \(stateBeforeA?.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("Notification"))
+        let stateAfterA = hookStatus[simSid]?.status
+        CNLog.sim("  after Notification: \(stateAfterA?.rawValue ?? "nil")")
+        CNLog.sim("  result: \(stateAfterA == .awaitingApproval ? "PASS (blocked)" : "FAIL (overridden!)")")
+
+        // --- Scenario B: Notification must NOT override idle ---
+        CNLog.sim("Scenario B: Notification vs idle (Bug 2)")
+        hookStatus[simSid] = nil
+        applyHookEvent(fakeEvent("UserPromptSubmit"))
+        applyHookEvent(fakeEvent("Stop"))
+        let stateBeforeB = hookStatus[simSid]?.status
+        CNLog.sim("  before Notification: \(stateBeforeB?.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("Notification"))
+        let stateAfterB = hookStatus[simSid]?.status
+        CNLog.sim("  after Notification: \(stateAfterB?.rawValue ?? "nil")")
+        CNLog.sim("  result: \(stateAfterB == .idle ? "PASS (blocked)" : "FAIL (overridden!)")")
+
+        // --- Scenario C: Normal lifecycle ---
+        CNLog.sim("Scenario C: Normal lifecycle")
+        hookStatus[simSid] = nil
+        applyHookEvent(fakeEvent("UserPromptSubmit"))
+        CNLog.sim("  after UserPromptSubmit: \(hookStatus[simSid]?.status.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("PreToolUse", tool: "Read"))
+        CNLog.sim("  after PreToolUse: \(hookStatus[simSid]?.status.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("PostToolUse", tool: "Read"))
+        CNLog.sim("  after PostToolUse: \(hookStatus[simSid]?.status.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("Stop"))
+        CNLog.sim("  after Stop: \(hookStatus[simSid]?.status.rawValue ?? "nil")")
+
+        // --- Scenario D: UserPromptSubmit revives idle session ---
+        CNLog.sim("Scenario D: UserPromptSubmit revives idle")
+        let stateBeforeD = hookStatus[simSid]?.status
+        CNLog.sim("  before: \(stateBeforeD?.rawValue ?? "nil")")
+        applyHookEvent(fakeEvent("UserPromptSubmit"))
+        let stateAfterD = hookStatus[simSid]?.status
+        CNLog.sim("  after UserPromptSubmit: \(stateAfterD?.rawValue ?? "nil")")
+        CNLog.sim("  result: \(stateAfterD == .working ? "PASS" : "FAIL")")
+
+        // Cleanup
+        hookStatus.removeValue(forKey: simSid)
+        hookAliveSessions.removeValue(forKey: simSid)
+        currentTools.removeValue(forKey: simSid)
+        sessionSubagents.removeValue(forKey: simSid)
+        sessionTodos.removeValue(forKey: simSid)
+
+        CNLog.sim("========== DIAGNOSTIC DONE ==========")
+        rebuildPublishedSessions()
     }
 }

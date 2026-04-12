@@ -67,6 +67,15 @@ final class FocusMonitor: ObservableObject {
             return
         }
         let bundleID = app.bundleIdentifier ?? ""
+        let wasTerminal = isTerminalFocused
         isTerminalFocused = Self.terminalBundleIDs.contains(bundleID)
+        let appName = app.localizedName ?? bundleID
+        if wasTerminal != isTerminalFocused {
+            if isTerminalFocused {
+                CNLog.focus("Terminal focused (\(appName))")
+            } else {
+                CNLog.focus("switched away from Terminal → \(appName)")
+            }
+        }
     }
 }

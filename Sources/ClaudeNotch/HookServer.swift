@@ -123,7 +123,7 @@ final class HookServer {
     func clearPendingApproval(sessionId: String) {
         if let clientFd = pendingApprovals.removeValue(forKey: sessionId) {
             close(clientFd)
-            CNLog.perm("cleared stale pending approval for \(sessionId)")
+            CNLog.perm("cleared stale pending approval for \(CNLog.sessionLabel(sessionId))")
         }
     }
 
@@ -133,10 +133,10 @@ final class HookServer {
     /// stdout for Claude Code to read.
     func resolvePermission(sessionId: String, decision: String) {
         guard let clientFd = pendingApprovals.removeValue(forKey: sessionId) else {
-            CNLog.perm("no pending approval for session \(sessionId)")
+            CNLog.perm("no pending approval for \(CNLog.sessionLabel(sessionId))")
             return
         }
-        CNLog.perm("resolving session=\(sessionId) decision=\(decision)")
+        CNLog.perm("resolving \(CNLog.sessionLabel(sessionId)) decision=\(decision)")
 
         // Claude Code PermissionRequest response format:
         //   "allow"  → hookSpecificOutput.decision.behavior = "allow"
@@ -169,7 +169,7 @@ final class HookServer {
             }
         }
         close(clientFd)
-        CNLog.perm("resolved permission for \(sessionId) → \(decision)")
+        CNLog.perm("resolved \(CNLog.sessionLabel(sessionId)) → \(decision)")
     }
 
     // MARK: - Accept loop (runs on background queue)
@@ -213,19 +213,19 @@ final class HookServer {
                    let tty = event.raw["_bridge_tty"] as? String, !tty.isEmpty {
                     if self.sessionTTY[sid] == nil {
                         self.sessionTTY[sid] = tty
-                        CNLog.log("TTY from bridge: session=\(sid) tty=\(tty)")
+                        CNLog.log("TTY from bridge: \(CNLog.sessionLabel(sid)) tty=\(tty)")
                     }
                 }
 
                 if isPermission, let sid = event.sessionId {
                     if let old = self.pendingApprovals[sid] {
-                        CNLog.perm("replacing stale pending fd for \(sid)")
+                        CNLog.perm("replacing stale pending fd for \(CNLog.sessionLabel(sid))")
                         close(old)
                     }
                     var on: Int32 = 1
                     setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                     self.pendingApprovals[sid] = clientFd
-                    CNLog.perm("stored pending approval fd=\(clientFd) for \(sid) tool=\(event.toolName ?? "-")")
+                    CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(event.toolName ?? "-")")
                 }
 
                 self.handler(event)
@@ -317,7 +317,7 @@ final class HookServer {
             }
         }
 
-        CNLog.log("TTY discovery for \(sessionId): found \(candidateTTYs.count) candidates: \(candidateTTYs)")
+        CNLog.log("TTY discovery for \(CNLog.sessionLabel(sessionId)): \(candidateTTYs.count) candidates: \(candidateTTYs)")
 
         // If only one candidate, use it
         if candidateTTYs.count == 1 { return candidateTTYs[0] }

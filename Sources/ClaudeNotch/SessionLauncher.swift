@@ -11,21 +11,21 @@ enum SessionLauncher {
         let targetCwd = resolveCwd(for: session)
         let sid = session.sessionID
 
-        CNLog.log("JUMP: session=\(sid) cwd=\(targetCwd)")
+        CNLog.log("JUMP: \(CNLog.sessionLabel(sid)) cwd=\(targetCwd)")
 
         // Try 1: use the known TTY from hook events (most precise).
         if let server = (NSApp.delegate as? AppDelegate)?.hookServer {
             let allTTYs = server.sessionTTY
             CNLog.log("JUMP: sessionTTY map has \(allTTYs.count) entries: \(allTTYs)")
             if let tty = allTTYs[sid] {
-                CNLog.log("JUMP: found hook TTY=\(tty) for session \(sid)")
+                CNLog.log("JUMP: found hook TTY=\(tty) for \(CNLog.sessionLabel(sid))")
                 if focusTerminalTab(tty: tty) {
                     CNLog.log("JUMP: SUCCESS via hook TTY")
                     return
                 }
                 CNLog.log("JUMP: hook TTY failed to focus")
             } else {
-                CNLog.log("JUMP: no hook TTY for session \(sid)")
+                CNLog.log("JUMP: no hook TTY for \(CNLog.sessionLabel(sid))")
             }
         }
 
