@@ -16,8 +16,6 @@ struct NotchView: View {
     @State private var focusedSessionId: String?
     @State private var hiddenSessionIDs: Set<String> = []
     @State private var hoverCooldownUntil: Date = .distantPast
-    @State private var isHovering = false
-    @State private var hoverExpandTask: DispatchWorkItem?
 
     /// Rows visible before the user taps "Show all N sessions".
     private let defaultRowLimit = 8
@@ -61,41 +59,22 @@ struct NotchView: View {
             .fixedSize(horizontal: false, vertical: true)
             .contentShape(notchShape)
             .onHover { hovering in
-                isHovering = hovering
+                if hovering && Date() < hoverCooldownUntil { return }
                 let hasPermission = watcher.sessions.contains { $0.status == .awaitingApproval }
-
                 if hovering {
-                    if Date() < hoverCooldownUntil { return }
-                    // Cancel any pending collapse.
-                    hoverExpandTask?.cancel()
-                    // Debounce expand: wait 150ms to confirm intent.
-                    // If already expanded, no delay needed.
-                    if isExpanded {
-                        if !hasPermission { autoExpanded = false }
-                        usage.refreshIfStale(maxAge: 20)
-                    } else {
-                        let task = DispatchWorkItem { [self] in
-                            guard isHovering else { return }
-                            withAnimation(expandAnimation) {
-                                CNLog.ui("hover expand")
-                                isExpanded = true
-                            }
-                            if !hasPermission { autoExpanded = false }
-                            usage.refreshIfStale(maxAge: 20)
-                        }
-                        hoverExpandTask = task
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+                    withAnimation(expandAnimation) {
+                        if !isExpanded { CNLog.ui("hover expand") }
+                        isExpanded = true
                     }
+                    if !hasPermission { autoExpanded = false }
+                    usage.refreshIfStale(maxAge: 20)
                 } else {
-                    // Cancel pending expand if mouse left before debounce.
-                    hoverExpandTask?.cancel()
-                    hoverExpandTask = nil
                     focusedSessionId = nil
                     if !autoExpanded && !hasPermission {
                         withAnimation(collapseAnimation) {
                             if isExpanded { CNLog.ui("hover collapse") }
                             isExpanded = false
-                            hoverCooldownUntil = Date().addingTimeInterval(0.8)
+                            hoverCooldownUntil = Date().addingTimeInterval(0.6)
                         }
                     }
                 }
