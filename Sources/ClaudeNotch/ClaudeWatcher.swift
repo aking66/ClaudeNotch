@@ -317,7 +317,10 @@ final class ClaudeWatcher: ObservableObject {
                 if status == .awaitingApproval && !isHookAlive {
                     let hasPending = (NSApp.delegate as? AppDelegate)?.hookServer?.hasPendingApproval(sessionId: sessionID) ?? false
                     if !hasPending {
-                        CNLog.state("polling awaitingApproval downgraded to idle (not hookAlive, no pending fd) session=\(CNLog.sessionLabel(sessionID))")
+                        // Only log once (not every 2s poll cycle).
+                        if lastStatus[jsonl] != .idle {
+                            CNLog.state("polling awaitingApproval downgraded to idle (not hookAlive, no pending fd) session=\(CNLog.sessionLabel(sessionID))")
+                        }
                         status = .idle
                     }
                 }

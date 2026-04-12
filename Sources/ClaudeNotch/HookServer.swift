@@ -65,6 +65,8 @@ final class HookServer {
         return home.appendingPathComponent("Library/Application Support/ClaudeNotch/bridge.sock")
     }
 
+    private var fdCheckTimer: Timer?
+
     func start() {
         let socketURL = Self.socketURL
         let dir = socketURL.deletingLastPathComponent()
@@ -121,9 +123,37 @@ final class HookServer {
         }
 
         NSLog("ClaudeNotch: HookServer listening at \(path)")
+
+        // Poll pending approval fds every 2s to detect when the bridge
+        // dies (user answered from terminal). When the fd is dead, clear
+        // the pending approval so the UI stops showing the permission card.
+        fdCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkPendingFds() }
+        }
+    }
+
+    /// Check if pending approval fds are still alive. If the bridge process
+    /// died (user answered permission from the terminal), the fd becomes
+    /// invalid and we clear the pending approval.
+    private func checkPendingFds() {
+        for (sid, fd) in pendingApprovals {
+            // Try a zero-byte send to check if the fd is still connected.
+            // MSG_NOSIGNAL equivalent on macOS: SO_NOSIGPIPE already set.
+            var zero: UInt8 = 0
+            let n = Darwin.send(fd, &zero, 0, 0)
+            if n < 0 && (errno == EPIPE || errno == EBADF || errno == ECONNRESET || errno == ENOTCONN) {
+                CNLog.perm("bridge fd dead (user answered in terminal) session=\(CNLog.sessionLabel(sid))")
+                pendingApprovals.removeValue(forKey: sid)
+                close(fd)
+                hadPendingApproval.remove(sid)
+                staleApprovalCallback?(sid)
+            }
+        }
     }
 
     func stop() {
+        fdCheckTimer?.invalidate()
+        fdCheckTimer = nil
         running = false
         if listenFd >= 0 {
             shutdown(listenFd, SHUT_RDWR)
