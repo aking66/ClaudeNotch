@@ -34,8 +34,13 @@ struct NotchView: View {
     private let maxExpandedContentHeight: CGFloat = 400
 
     private var currentWidth: CGFloat { isExpanded ? expandedWidth : collapsedWidth }
-    private var topCornerR: CGFloat { isExpanded ? 14 : 8 }
-    private var bottomCornerR: CGFloat { isExpanded ? 26 : 18 }
+    private var topCornerR: CGFloat { isExpanded ? 16 : 12 }
+    private var bottomCornerR: CGFloat { isExpanded ? 26 : 20 }
+
+    /// Expand: slightly slower, luxurious feel with subtle bounce.
+    private let expandAnimation: Animation = .spring(response: 0.4, dampingFraction: 0.78)
+    /// Collapse: snappy retract, no bounce.
+    private let collapseAnimation: Animation = .spring(response: 0.28, dampingFraction: 0.88)
 
     // MARK: - Body
 
@@ -58,11 +63,13 @@ struct NotchView: View {
                 // A pending permission keeps the panel pinned open —
                 // hovering in/out must not collapse it.
                 let hasPermission = watcher.sessions.contains { $0.status == .awaitingApproval }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                    if hovering {
+                if hovering {
+                    withAnimation(expandAnimation) {
                         if !isExpanded { CNLog.ui("hover expand") }
                         isExpanded = true
-                    } else if !autoExpanded && !hasPermission {
+                    }
+                } else if !autoExpanded && !hasPermission {
+                    withAnimation(collapseAnimation) {
                         if isExpanded { CNLog.ui("hover collapse") }
                         isExpanded = false
                         hoverCooldownUntil = Date().addingTimeInterval(0.5)
@@ -83,14 +90,12 @@ struct NotchView: View {
             // Uses a counter so onChange always fires even for repeat events.
             .onChange(of: watcher.autoExpandCounter) { _ in
                 guard let sid = watcher.autoExpandFocusedSession else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                withAnimation(expandAnimation) {
                     isExpanded = true
                     autoExpanded = true
                     focusedSessionId = sid
                     showAllSessions = false
                 }
-                // Done cards auto-collapse after 8s. Permission cards STAY
-                // until the user responds (no timeout).
                 let session = watcher.sessions.first { $0.sessionID == sid }
                 let isPermission = session?.status == .awaitingApproval
                 if !isPermission {
@@ -98,7 +103,7 @@ struct NotchView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                         if autoExpanded && watcher.autoExpandCounter == counter {
                             CNLog.ui("auto-expand timer collapse")
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                            withAnimation(collapseAnimation) {
                                 isExpanded = false
                                 autoExpanded = false
                                 focusedSessionId = nil
@@ -113,7 +118,7 @@ struct NotchView: View {
                 let hasPermission = watcher.sessions.contains { $0.status == .awaitingApproval }
                 if isExpanded && !autoExpanded && !hasPermission {
                     CNLog.ui("app-switch collapse")
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                    withAnimation(collapseAnimation) {
                         isExpanded = false
                         focusedSessionId = nil
                     }
@@ -134,8 +139,10 @@ struct NotchView: View {
     private var content: some View {
         if isExpanded {
             expandedContent
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
         } else {
             collapsedContent
+                .transition(.opacity)
         }
     }
 
@@ -442,11 +449,9 @@ struct NotchView: View {
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(bgColor))
         .contentShape(Rectangle())
         .onTapGesture {
-            // Don't JUMP while a permission is pending — the user needs
-            // the panel open to click the approval buttons.
             if session.status == .awaitingApproval { return }
             SessionLauncher.open(session)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            withAnimation(collapseAnimation) {
                 isExpanded = false
                 autoExpanded = false
                 focusedSessionId = nil
@@ -474,7 +479,7 @@ struct NotchView: View {
             badge("Claude")
             Button {
                 SessionLauncher.open(session)
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                withAnimation(collapseAnimation) {
                     isExpanded = false
                     autoExpanded = false
                     focusedSessionId = nil
@@ -992,9 +997,7 @@ struct NotchView: View {
         Button {
             guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
             appDelegate.resolvePermission(sessionId: sessionId, decision: decision)
-            // Collapse the panel immediately after answering — don't wait
-            // for PostToolUse which can take seconds.
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            withAnimation(collapseAnimation) {
                 isExpanded = false
                 autoExpanded = false
                 focusedSessionId = nil
