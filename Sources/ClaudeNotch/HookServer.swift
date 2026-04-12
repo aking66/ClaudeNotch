@@ -137,11 +137,25 @@ final class HookServer {
     /// invalid and we clear the pending approval.
     private func checkPendingFds() {
         for (sid, fd) in pendingApprovals {
-            // Try a zero-byte send to check if the fd is still connected.
-            // MSG_NOSIGNAL equivalent on macOS: SO_NOSIGPIPE already set.
-            var zero: UInt8 = 0
-            let n = Darwin.send(fd, &zero, 0, 0)
-            if n < 0 && (errno == EPIPE || errno == EBADF || errno == ECONNRESET || errno == ENOTCONN) {
+            // Use poll() to check if the fd has been closed by the bridge.
+            // POLLHUP/POLLERR/POLLNVAL = the other end hung up.
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ret = poll(&pfd, 1, 0)  // non-blocking (timeout=0)
+            let revents = Int32(pfd.revents)
+            let isDead = ret > 0 && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0
+            // Also try recv peek — if bridge shut down write end, we get 0.
+            var peekDead = false
+            if !isDead {
+                var buf = [UInt8](repeating: 0, count: 1)
+                // Set non-blocking temporarily.
+                let flags = fcntl(fd, F_GETFL)
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+                let n = recv(fd, &buf, 1, Int32(MSG_PEEK))
+                fcntl(fd, F_SETFL, flags)  // restore
+                // n==0 means EOF (bridge closed), n<0 with EAGAIN means still alive
+                peekDead = (n == 0)
+            }
+            if isDead || peekDead {
                 CNLog.perm("bridge fd dead (user answered in terminal) session=\(CNLog.sessionLabel(sid))")
                 pendingApprovals.removeValue(forKey: sid)
                 close(fd)
