@@ -310,6 +310,18 @@ final class ClaudeWatcher: ObservableObject {
                     status = Self.classifyStatus(tail: tail, fileModifiedAt: mod, now: now,
                                                  approvalIdleThreshold: approvalIdleThreshold)
                 }
+                // Don't show awaitingApproval from JSONL polling if the session
+                // isn't actually alive via hooks and has no pending fd in the
+                // HookServer. This prevents stale tool_use entries from making
+                // finished sessions look like they need approval.
+                if status == .awaitingApproval && !isHookAlive {
+                    let hasPending = (NSApp.delegate as? AppDelegate)?.hookServer?.hasPendingApproval(sessionId: sessionID) ?? false
+                    if !hasPending {
+                        CNLog.state("polling awaitingApproval downgraded to idle (not hookAlive, no pending fd) session=\(CNLog.sessionLabel(sessionID))")
+                        status = .idle
+                    }
+                }
+
                 // Detect interrupted sessions: snippet contains "[Request interrupted"
                 if status == .idle,
                    let snippet = tail.snippet,

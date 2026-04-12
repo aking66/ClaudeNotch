@@ -1185,21 +1185,39 @@ struct PixelAvatar: View {
 
 /// Draws a concave (inverse) quarter-circle used at the top edges of the
 /// expanded panel to create a smooth connection with the notch cutout.
-/// Inverse (concave) quarter-circle corner. Fills the area between a square
-/// and a quarter-circle arc, creating the "ear" shape seen at the top edges
-/// of notch-style panels (like Vibe Island / NotchNook).
+/// Inverse (concave) quarter-circle corner for the LEFT side of a
+/// notch-extending panel. Fills the "ear" between the panel's top-left
+/// edge and a concave arc that curves downward, creating the smooth
+/// visual connection between the notch cutout and the panel body.
+///
+/// Layout (left ear, before offset):
+/// ```
+/// (0,0)━━━━(r,0)   ← top edge (behind notch)
+///    ╲          │
+///      ╲        │   ← panel left edge
+///        ╲      │
+///          ╲    │
+///            ╲  │
+///             (r,r)  ← curve meets panel side
+/// ```
+/// The concave arc faces toward (r,0) = the panel's top corner.
+/// Mirror with scaleEffect(x: -1) for the right ear.
 struct InverseCorner: Shape {
     let radius: CGFloat
     func path(in rect: CGRect) -> Path {
         let r = min(radius, min(rect.width, rect.height))
         var p = Path()
-        p.move(to: CGPoint(x: r, y: 0))
+        // Top-left corner (extends outward from panel)
+        p.move(to: CGPoint(x: 0, y: 0))
+        // Top-right (panel's top-left edge)
+        p.addLine(to: CGPoint(x: r, y: 0))
+        // Down along panel's left edge
         p.addLine(to: CGPoint(x: r, y: r))
-        p.addLine(to: CGPoint(x: 0, y: r))
-        // Concave arc from (0, r) curving inward to (r, 0).
-        p.addArc(center: .zero, radius: r,
-                 startAngle: .degrees(90), endAngle: .degrees(0),
-                 clockwise: true)
+        // Concave arc from (r,r) curving outward back to (0,0).
+        // Center at (r,0) so the concavity faces the panel.
+        p.addArc(center: CGPoint(x: r, y: 0), radius: r,
+                 startAngle: .degrees(90), endAngle: .degrees(180),
+                 clockwise: false)
         p.closeSubpath()
         return p
     }

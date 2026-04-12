@@ -53,6 +53,11 @@ final class HookServer {
     /// Number of pending permission prompts.
     var pendingCount: Int { pendingApprovals.count }
 
+    /// Check if a specific session has a pending approval fd.
+    func hasPendingApproval(sessionId: String) -> Bool {
+        pendingApprovals[sessionId] != nil
+    }
+
     // MARK: - Public
 
     static var socketURL: URL {
