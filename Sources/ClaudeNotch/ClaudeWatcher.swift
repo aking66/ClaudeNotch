@@ -310,18 +310,15 @@ final class ClaudeWatcher: ObservableObject {
                     status = Self.classifyStatus(tail: tail, fileModifiedAt: mod, now: now,
                                                  approvalIdleThreshold: approvalIdleThreshold)
                 }
-                // Don't show awaitingApproval from JSONL polling if the session
-                // isn't actually alive via hooks and has no pending fd in the
-                // HookServer. This prevents stale tool_use entries from making
-                // finished sessions look like they need approval.
-                if status == .awaitingApproval && !isHookAlive {
+                // Polling should NEVER set awaitingApproval — only the
+                // PermissionRequest hook can do that. Polling sees tool_use
+                // as the last JSONL entry but can't distinguish "permission
+                // pending" from "long-running command already approved".
+                // Downgrade to working (if hookAlive) or idle (if not).
+                if status == .awaitingApproval {
                     let hasPending = (NSApp.delegate as? AppDelegate)?.hookServer?.hasPendingApproval(sessionId: sessionID) ?? false
                     if !hasPending {
-                        // Only log once (not every 2s poll cycle).
-                        if lastStatus[jsonl] != .idle {
-                            CNLog.state("polling awaitingApproval downgraded to idle (not hookAlive, no pending fd) session=\(CNLog.sessionLabel(sessionID))")
-                        }
-                        status = .idle
+                        status = isHookAlive ? .working : .idle
                     }
                 }
 
@@ -766,7 +763,9 @@ final class ClaudeWatcher: ObservableObject {
                     }
                     result = result.with(status: hook.status)
                 } else {
+                    // Log expiry once, then clean up.
                     CNLog.state("hookStatus expired: \(hook.status.rawValue) age=\(Int(age))s session=\(CNLog.sessionLabel(session.sessionID))")
+                    hookStatus.removeValue(forKey: session.sessionID)
                 }
             }
             if let tool = currentTools[session.sessionID] {
