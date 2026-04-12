@@ -36,6 +36,9 @@ final class HookServer {
     /// Used to distinguish "answered from terminal" vs "never had a prompt".
     private var hadPendingApproval: Set<String> = []
 
+    /// When each pending approval was stored, for timeout-based cleanup.
+    private var pendingApprovalTimes: [String: Date] = [:]
+
     /// TTY per session, discovered from the bridge process's parent.
     /// Used to focus the correct terminal tab.
     private(set) var sessionTTY: [String: String] = [:]
@@ -132,33 +135,29 @@ final class HookServer {
         }
     }
 
-    /// Check if pending approval fds are still alive. If the bridge process
-    /// died (user answered permission from the terminal), the fd becomes
-    /// invalid and we clear the pending approval.
+    /// Check if pending approval fds are stale. The bridge does
+    /// shutdown(SHUT_WR) after sending the payload, so recv() sees EOF
+    /// even when the bridge is alive and waiting. Instead, we track
+    /// the time each pending approval was stored and clear it if no
+    /// PostToolUse arrives within a generous window (30s).
+    /// Real permissions are fast: user clicks within seconds. If 30s
+    /// passes without PostToolUse, the user answered from terminal.
     private func checkPendingFds() {
-        for (sid, fd) in pendingApprovals {
-            // Use poll() to check if the fd has been closed by the bridge.
-            // POLLHUP/POLLERR/POLLNVAL = the other end hung up.
-            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ret = poll(&pfd, 1, 0)  // non-blocking (timeout=0)
-            let revents = Int32(pfd.revents)
-            let isDead = ret > 0 && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0
-            // Also try recv peek — if bridge shut down write end, we get 0.
-            var peekDead = false
-            if !isDead {
-                var buf = [UInt8](repeating: 0, count: 1)
-                // Set non-blocking temporarily.
-                let flags = fcntl(fd, F_GETFL)
-                fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-                let n = recv(fd, &buf, 1, Int32(MSG_PEEK))
-                fcntl(fd, F_SETFL, flags)  // restore
-                // n==0 means EOF (bridge closed), n<0 with EAGAIN means still alive
-                peekDead = (n == 0)
+        let now = Date()
+        for (sid, storedAt) in pendingApprovalTimes {
+            guard pendingApprovals[sid] != nil else {
+                pendingApprovalTimes.removeValue(forKey: sid)
+                continue
             }
-            if isDead || peekDead {
-                CNLog.perm("bridge fd dead (user answered in terminal) session=\(CNLog.sessionLabel(sid))")
-                pendingApprovals.removeValue(forKey: sid)
-                close(fd)
+            let age = now.timeIntervalSince(storedAt)
+            // Don't clear too early — give the user time to respond via UI.
+            // But after 30s with no PostToolUse, assume terminal-answered.
+            if age > 30 {
+                CNLog.perm("pending approval timed out after \(Int(age))s (likely terminal-answered) session=\(CNLog.sessionLabel(sid))")
+                if let fd = pendingApprovals.removeValue(forKey: sid) {
+                    close(fd)
+                }
+                pendingApprovalTimes.removeValue(forKey: sid)
                 hadPendingApproval.remove(sid)
                 staleApprovalCallback?(sid)
             }
@@ -204,6 +203,7 @@ final class HookServer {
             return
         }
         resolvedViaUI.insert(sessionId)
+        pendingApprovalTimes.removeValue(forKey: sessionId)
         CNLog.perm("resolving via UI: \(CNLog.sessionLabel(sessionId)) decision=\(decision)")
 
         // Claude Code PermissionRequest response format:
@@ -340,6 +340,7 @@ final class HookServer {
                     setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                     self.pendingApprovals[sid] = clientFd
                     self.hadPendingApproval.insert(sid)
+                    self.pendingApprovalTimes[sid] = Date()
                     CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(event.toolName ?? "-")")
                 }
 
