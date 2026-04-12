@@ -50,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let server = HookServer { [weak watcher, weak usage] event in
             let sid = event.sessionId ?? "?"
             let tool = event.toolName ?? "-"
+            // Register name from cwd BEFORE logging so the first line is readable.
+            if let cwd = event.cwd, !cwd.isEmpty, sid != "?" {
+                CNLog.registerSession(id: sid, name: (cwd as NSString).lastPathComponent, fromHook: true)
+            }
             CNLog.hook("\(event.hookEventName) session=\(CNLog.sessionLabel(sid)) tool=\(tool)")
             if let input = event.toolInput, !input.isEmpty {
                 let detail = ClaudeWatcher.describeToolInput(toolName: tool, input: event.toolInput) ?? ""

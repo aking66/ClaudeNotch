@@ -34,8 +34,12 @@ enum CNLog {
     private static var sessionNames: [String: String] = [:]
 
     /// Register a session's project name so logs show readable labels.
-    static func registerSession(id: String, name: String) {
-        sessionNames[id] = name
+    /// Names from hooks (real folder names) take priority over polling
+    /// (decoded path names that mangle hyphens into slashes).
+    static func registerSession(id: String, name: String, fromHook: Bool = false) {
+        if fromHook || sessionNames[id] == nil {
+            sessionNames[id] = name
+        }
     }
 
     /// Returns a short readable label: "project(abcd)" or "abcd" if unknown.

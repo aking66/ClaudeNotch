@@ -391,9 +391,10 @@ final class ClaudeWatcher: ObservableObject {
 
         // Register session name from cwd so logs are readable even before
         // the first polling cycle discovers the session on disk.
+        // fromHook: true so it takes priority over polling's decoded names.
         if let cwd = event.cwd, !cwd.isEmpty {
             let name = (cwd as NSString).lastPathComponent
-            CNLog.registerSession(id: sid, name: name)
+            CNLog.registerSession(id: sid, name: name, fromHook: true)
         }
 
         // Track alive sessions via SessionStart/SessionEnd hooks.

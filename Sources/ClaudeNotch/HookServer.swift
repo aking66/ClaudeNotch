@@ -208,6 +208,11 @@ final class HookServer {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
+                // Register session name early so all log lines are readable.
+                if let sid = event.sessionId, let cwd = event.cwd, !cwd.isEmpty {
+                    CNLog.registerSession(id: sid, name: (cwd as NSString).lastPathComponent, fromHook: true)
+                }
+
                 // Store TTY from bridge (injected as _bridge_tty by the bridge process).
                 if let sid = event.sessionId,
                    let tty = event.raw["_bridge_tty"] as? String, !tty.isEmpty {
