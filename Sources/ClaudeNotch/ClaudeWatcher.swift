@@ -202,6 +202,9 @@ final class ClaudeWatcher: ObservableObject {
     private var pendingAgentType: [String: String] = [:]
     private var pendingAgentDesc: [String: String] = [:]
 
+    /// Last logged terminal summary, to avoid spamming identical summaries.
+    private var lastTerminalSummary: String = ""
+
     /// Session-status overrides driven by Claude Code hook events.
     /// Keyed by session UUID (matches ClaudeSession.sessionID). Each
     /// override carries the timestamp it was written so it can expire.
@@ -583,12 +586,13 @@ final class ClaudeWatcher: ObservableObject {
             let isThisSessionFocused = focusMonitor?.isTerminalFocused == true
                 && sessionCwd != nil
                 && SessionLauncher.isSessionTerminalActive(cwd: sessionCwd!)
+            let currentApp = focusMonitor?.currentAppName ?? "?"
             if !isThisSessionFocused {
-                CNLog.ui("auto-expand: Stop session=\(CNLog.sessionLabel(sid)) (terminal not focused)")
+                CNLog.ui("auto-expand: Stop \(CNLog.sessionLabel(sid)) (user in \(currentApp))")
                 autoExpandFocusedSession = sid
                 autoExpandCounter += 1
             } else {
-                CNLog.ui("suppressed: Stop session=\(CNLog.sessionLabel(sid)) (terminal focused)")
+                CNLog.ui("suppressed: Stop \(CNLog.sessionLabel(sid)) (user watching terminal)")
             }
         }
 
@@ -752,6 +756,17 @@ final class ClaudeWatcher: ObservableObject {
             return result
         }
         sessions = merged.sorted { $0.lastModified > $1.lastModified }
+
+        // Log terminal summary when it changes.
+        if let server = (NSApp.delegate as? AppDelegate)?.hookServer {
+            let summary = server.terminalSummary
+            if summary != lastTerminalSummary {
+                let active = sessions.filter { $0.status.isBusy }
+                let pending = server.pendingCount
+                CNLog.focus("terminals: \(summary) | active=\(active.count) pending=\(pending)")
+                lastTerminalSummary = summary
+            }
+        }
     }
 
     // MARK: - Status classification

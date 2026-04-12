@@ -30,6 +30,9 @@ final class FocusMonitor: ObservableObject {
 
     private var observation: Any?
 
+    /// The currently focused app name, for logging.
+    private(set) var currentAppName: String = ""
+
     func start() {
         // Check initial state
         updateFocusState()
@@ -43,7 +46,12 @@ final class FocusMonitor: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 let previousTerminal = self.isTerminalFocused
+                let previousApp = self.currentAppName
                 self.updateFocusState()
+
+                if previousApp != self.currentAppName {
+                    CNLog.focus("\(previousApp) → \(self.currentAppName)")
+                }
 
                 // If user switched away from a terminal to something else,
                 // signal collapse (they're no longer looking at Claude output).
@@ -67,15 +75,7 @@ final class FocusMonitor: ObservableObject {
             return
         }
         let bundleID = app.bundleIdentifier ?? ""
-        let wasTerminal = isTerminalFocused
         isTerminalFocused = Self.terminalBundleIDs.contains(bundleID)
-        let appName = app.localizedName ?? bundleID
-        if wasTerminal != isTerminalFocused {
-            if isTerminalFocused {
-                CNLog.focus("Terminal focused (\(appName))")
-            } else {
-                CNLog.focus("switched away from Terminal → \(appName)")
-            }
-        }
+        currentAppName = app.localizedName ?? bundleID
     }
 }

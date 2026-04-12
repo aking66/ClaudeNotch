@@ -27,6 +27,15 @@ final class HookServer {
     /// waiting for a decision from the UI. Keyed by session_id.
     private var pendingApprovals: [String: Int32] = [:]
 
+    /// Tracks which sessions had their permission resolved via the UI
+    /// (resolvePermission was called). When PostToolUse arrives and the
+    /// session is NOT in this set, the user answered from the terminal.
+    private var resolvedViaUI: Set<String> = []
+
+    /// Sessions that currently have or recently had a pending permission.
+    /// Used to distinguish "answered from terminal" vs "never had a prompt".
+    private var hadPendingApproval: Set<String> = []
+
     /// TTY per session, discovered from the bridge process's parent.
     /// Used to focus the correct terminal tab.
     private(set) var sessionTTY: [String: String] = [:]
@@ -34,6 +43,15 @@ final class HookServer {
     init(handler: @escaping (Event) -> Void) {
         self.handler = handler
     }
+
+    /// Returns a summary of known TTY→session mappings for logging.
+    var terminalSummary: String {
+        if sessionTTY.isEmpty { return "no active TTYs" }
+        return sessionTTY.map { "\(CNLog.sessionLabel($0.key))=\($0.value)" }.joined(separator: ", ")
+    }
+
+    /// Number of pending permission prompts.
+    var pendingCount: Int { pendingApprovals.count }
 
     // MARK: - Public
 
@@ -136,7 +154,8 @@ final class HookServer {
             CNLog.perm("no pending approval for \(CNLog.sessionLabel(sessionId))")
             return
         }
-        CNLog.perm("resolving \(CNLog.sessionLabel(sessionId)) decision=\(decision)")
+        resolvedViaUI.insert(sessionId)
+        CNLog.perm("resolving via UI: \(CNLog.sessionLabel(sessionId)) decision=\(decision)")
 
         // Claude Code PermissionRequest response format:
         //   "allow"  → hookSpecificOutput.decision.behavior = "allow"
@@ -169,7 +188,23 @@ final class HookServer {
             }
         }
         close(clientFd)
-        CNLog.perm("resolved \(CNLog.sessionLabel(sessionId)) → \(decision)")
+        CNLog.perm("resolved via UI: \(CNLog.sessionLabel(sessionId)) → \(decision)")
+    }
+
+    /// Called from AppDelegate when PostToolUse arrives. If there's still
+    /// a pending fd that wasn't resolved via UI, the user answered from
+    /// the terminal. Log the source for diagnostics.
+    func detectPermissionSource(sessionId: String) {
+        if resolvedViaUI.remove(sessionId) != nil {
+            // Already logged as "via UI" in resolvePermission.
+            hadPendingApproval.remove(sessionId)
+            return
+        }
+        // Only log "via Terminal" if this session actually had a pending
+        // approval that's now gone (bridge exited because user answered).
+        if hadPendingApproval.remove(sessionId) != nil && pendingApprovals[sessionId] == nil {
+            CNLog.perm("resolved via Terminal: \(CNLog.sessionLabel(sessionId))")
+        }
     }
 
     // MARK: - Accept loop (runs on background queue)
@@ -230,6 +265,7 @@ final class HookServer {
                     var on: Int32 = 1
                     setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                     self.pendingApprovals[sid] = clientFd
+                    self.hadPendingApproval.insert(sid)
                     CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(event.toolName ?? "-")")
                 }
 

@@ -65,6 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
                 usage?.refreshIfStale(maxAge: 30)
             }
+            // Detect if permission was answered from terminal vs UI.
+            if event.hookEventName == "PostToolUse", let sid2 = event.sessionId {
+                (NSApp.delegate as? AppDelegate)?.hookServer?.detectPermissionSource(sessionId: sid2)
+            }
             if event.hookEventName == "Stop", let sid2 = event.sessionId {
                 (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid2)
             }
