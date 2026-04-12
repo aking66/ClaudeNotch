@@ -57,6 +57,8 @@ struct NotchView: View {
             .frame(width: currentWidth)
             .frame(maxHeight: isExpanded ? maxExpandedContentHeight + notchInset : collapsedContentHeight + notchInset)
             .fixedSize(horizontal: false, vertical: true)
+            .clipShape(notchShape)
+            .shadow(color: .black.opacity(0.3), radius: isExpanded ? 12 : 4, y: 3)
             .contentShape(notchShape)
             .onHover { hovering in
                 if hovering && Date() < hoverCooldownUntil { return }
@@ -1049,8 +1051,8 @@ struct NotchView: View {
     private var background: some View {
         notchShape
             .fill(Color.black)
-            .shadow(color: .black.opacity(0.3), radius: isExpanded ? 12 : 4, y: 3)
     }
+
 
     // MARK: - Formatting helpers
 
