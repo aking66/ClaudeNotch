@@ -584,6 +584,18 @@ final class ClaudeWatcher: ObservableObject {
         }
 
         let previousStatus = hookStatus[sid]?.status
+
+        // Don't let Notification/SubagentStart/SubagentStop override
+        // awaitingApproval — a pending permission prompt is still open.
+        if previousStatus == .awaitingApproval && newStatus == .working {
+            let isRealWork = ["UserPromptSubmit", "PreToolUse", "PostToolUse"].contains(event.hookEventName)
+            if !isRealWork {
+                CNLog.state("blocked \(event.hookEventName) from overriding awaitingApproval session=\(sid)")
+                rebuildPublishedSessions()
+                return
+            }
+        }
+
         hookStatus[sid] = (newStatus, Date())
 
         if previousStatus != newStatus {
@@ -694,10 +706,15 @@ final class ClaudeWatcher: ObservableObject {
             var result = session
             if let hook = hookStatus[session.sessionID] {
                 let age = now.timeIntervalSince(hook.at)
-                // Compacting gets a shorter TTL (5 min) since it can be cancelled.
-                let ttl = hook.status == .compacting ? 300.0 : hookStatusTTL
+                // idle/interrupted from Stop/SessionEnd is a final verdict —
+                // never expire it so the polling fallback can't flip it back
+                // to working based on a stale tool_use in the JSONL tail.
+                let isFinal = hook.status == .idle || hook.status == .interrupted
+                let ttl = isFinal ? Double.infinity : (hook.status == .compacting ? 300.0 : hookStatusTTL)
                 if age < ttl {
                     result = result.with(status: hook.status)
+                } else {
+                    CNLog.state("hookStatus expired: \(hook.status.rawValue) age=\(Int(age))s session=\(session.sessionID)")
                 }
             }
             if let tool = currentTools[session.sessionID] {
