@@ -170,6 +170,10 @@ final class ClaudeWatcher: ObservableObject {
     /// notifications / avoid flicker from transient parse failures.
     private var lastStatus: [URL: SessionStatus] = [:]
 
+    /// Last logged polling conflict per session, to avoid spamming the log
+    /// every 2s with the same "hook X overrides poll Y" message.
+    private var lastLoggedConflict: [String: String] = [:]
+
     /// Sessions built from disk on the last refresh, keyed by URL. The
     /// published `sessions` array is produced by merging this with hook
     /// overrides so UI updates can arrive without re-scanning disk.
@@ -384,6 +388,13 @@ final class ClaudeWatcher: ObservableObject {
     /// sub-100ms latency.
     func applyHookEvent(_ event: HookServer.Event) {
         guard let sid = event.sessionId, !sid.isEmpty else { return }
+
+        // Register session name from cwd so logs are readable even before
+        // the first polling cycle discovers the session on disk.
+        if let cwd = event.cwd, !cwd.isEmpty {
+            let name = (cwd as NSString).lastPathComponent
+            CNLog.registerSession(id: sid, name: name)
+        }
 
         // Track alive sessions via SessionStart/SessionEnd hooks.
         // This keeps sessions visible even when their jsonl file hasn't
@@ -715,7 +726,13 @@ final class ClaudeWatcher: ObservableObject {
                 let ttl = isFinal ? Double.infinity : (hook.status == .compacting ? 300.0 : hookStatusTTL)
                 if age < ttl {
                     if hook.status != session.status {
-                        CNLog.state("hook \(hook.status.rawValue) overrides poll \(session.status.rawValue) for \(CNLog.sessionLabel(session.sessionID))")
+                        let key = "\(hook.status.rawValue)>\(session.status.rawValue)"
+                        if lastLoggedConflict[session.sessionID] != key {
+                            CNLog.state("hook \(hook.status.rawValue) overrides poll \(session.status.rawValue) for \(CNLog.sessionLabel(session.sessionID))")
+                            lastLoggedConflict[session.sessionID] = key
+                        }
+                    } else {
+                        lastLoggedConflict.removeValue(forKey: session.sessionID)
                     }
                     result = result.with(status: hook.status)
                 } else {
