@@ -123,7 +123,7 @@ final class HookServer {
     func clearPendingApproval(sessionId: String) {
         if let clientFd = pendingApprovals.removeValue(forKey: sessionId) {
             close(clientFd)
-            NSLog("ClaudeNotch: cleared stale pending approval for \(sessionId)")
+            CNLog.perm("cleared stale pending approval for \(sessionId)")
         }
     }
 
@@ -133,9 +133,10 @@ final class HookServer {
     /// stdout for Claude Code to read.
     func resolvePermission(sessionId: String, decision: String) {
         guard let clientFd = pendingApprovals.removeValue(forKey: sessionId) else {
-            NSLog("ClaudeNotch: no pending approval for session \(sessionId)")
+            CNLog.perm("no pending approval for session \(sessionId)")
             return
         }
+        CNLog.perm("resolving session=\(sessionId) decision=\(decision)")
 
         // Claude Code PermissionRequest response format:
         //   "allow"  → hookSpecificOutput.decision.behavior = "allow"
@@ -168,7 +169,7 @@ final class HookServer {
             }
         }
         close(clientFd)
-        NSLog("ClaudeNotch: resolved permission for \(sessionId) → \(decision)")
+        CNLog.perm("resolved permission for \(sessionId) → \(decision)")
     }
 
     // MARK: - Accept loop (runs on background queue)
@@ -217,15 +218,14 @@ final class HookServer {
                 }
 
                 if isPermission, let sid = event.sessionId {
-                    // Close any stale pending fd for this session before
-                    // storing the new one (e.g. user cancelled and retried).
                     if let old = self.pendingApprovals[sid] {
+                        CNLog.perm("replacing stale pending fd for \(sid)")
                         close(old)
                     }
-                    // Prevent SIGPIPE on this specific fd as well.
                     var on: Int32 = 1
                     setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                     self.pendingApprovals[sid] = clientFd
+                    CNLog.perm("stored pending approval fd=\(clientFd) for \(sid) tool=\(event.toolName ?? "-")")
                 }
 
                 self.handler(event)

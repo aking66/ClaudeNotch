@@ -30,5 +30,14 @@ fi
 codesign --force --deep --sign - "${APP_BUNDLE}" >/dev/null 2>&1 || true
 
 echo "▸ Done: ${APP_BUNDLE}"
-echo "▸ Launch:  open ${APP_BUNDLE}"
-echo "▸ Or run:  ./run.sh"
+
+# Auto-restart if the app is already running.
+if pgrep -x "${APP_NAME}" >/dev/null 2>&1; then
+    echo "▸ Restarting ${APP_NAME}..."
+    pkill -x "${APP_NAME}" 2>/dev/null || true
+    sleep 0.5
+    open "${APP_BUNDLE}"
+    echo "▸ ${APP_NAME} relaunched."
+else
+    echo "▸ Launch:  open ${APP_BUNDLE}"
+fi

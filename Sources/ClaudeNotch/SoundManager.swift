@@ -75,17 +75,17 @@ final class SoundManager {
     // MARK: - Playback
 
     private func play(_ sound: Sound) {
-        // Look for the sound file in the app bundle Resources/Sounds/sounds/
         guard let url = soundURL(sound) else {
-            NSLog("ClaudeNotch: sound file not found: \(sound.rawValue)")
+            CNLog.sound("file not found: \(sound.rawValue)")
             return
         }
         do {
             player = try AVAudioPlayer(contentsOf: url)
             player?.volume = 0.6
             player?.play()
+            CNLog.sound("playing \(sound.rawValue)")
         } catch {
-            NSLog("ClaudeNotch: failed to play \(sound.rawValue): \(error)")
+            CNLog.sound("failed to play \(sound.rawValue): \(error)")
         }
     }
 

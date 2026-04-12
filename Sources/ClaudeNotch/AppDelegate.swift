@@ -48,18 +48,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // PostToolUse / Stop also poke the usage fetcher because every
         // finished turn nudges the 5h / 7d counters on Anthropic's side.
         let server = HookServer { [weak watcher, weak usage] event in
-            NSLog("ClaudeNotch hook: \(event.hookEventName) session=\(event.sessionId ?? "?") tool=\(event.toolName ?? "-")")
+            let sid = event.sessionId ?? "?"
+            let tool = event.toolName ?? "-"
+            CNLog.hook("\(event.hookEventName) session=\(sid) tool=\(tool)")
+            if let input = event.toolInput, !input.isEmpty {
+                let detail = ClaudeWatcher.describeToolInput(toolName: tool, input: event.toolInput) ?? ""
+                if !detail.isEmpty { CNLog.tool("\(tool): \(detail)") }
+            }
             watcher?.applyHookEvent(event)
             SoundManager.shared.playForEvent(event.hookEventName, toolName: event.toolName)
 
             if event.hookEventName == "PostToolUse" || event.hookEventName == "Stop" {
                 usage?.refreshIfStale(maxAge: 30)
             }
-            // Only clear pending approval on Stop (session ended) — NOT on
-            // every PostToolUse, as that would clear the pending fd for a
-            // PermissionRequest that's still waiting while other tools run.
-            if event.hookEventName == "Stop", let sid = event.sessionId {
-                (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid)
+            if event.hookEventName == "Stop", let sid2 = event.sessionId {
+                (NSApp.delegate as? AppDelegate)?.hookServer?.clearPendingApproval(sessionId: sid2)
             }
         }
         server.start()

@@ -406,18 +406,18 @@ final class ClaudeWatcher: ObservableObject {
         case "PreToolUse":
             if let name = event.toolName {
                 let desc = event.toolInput?["description"] as? String
+                let detail = Self.describeToolInput(toolName: name, input: event.toolInput)
+                CNLog.tool("PreToolUse: \(name) \(detail ?? "") session=\(sid)")
                 currentTools[sid] = CurrentTool(
                     name: name,
-                    detail: Self.describeToolInput(
-                        toolName: name,
-                        input: event.toolInput
-                    ),
+                    detail: detail,
                     description: desc,
                     diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput),
                     hasAlwaysAllow: false
                 )
             }
         case "PostToolUse":
+            CNLog.tool("PostToolUse: \(event.toolName ?? "-") session=\(sid)")
             break  // Keep showing last tool
         case "Stop", "SessionEnd":
             break  // Keep showing last tool even when idle
@@ -429,7 +429,6 @@ final class ClaudeWatcher: ObservableObject {
         switch event.hookEventName {
         case "SubagentStart":
             let subId = event.raw["subagent_id"] as? String ?? UUID().uuidString
-            // Try multiple field names — Claude Code may use different keys
             let agentType = event.raw["subagent_type"] as? String
                 ?? event.raw["agent_type"] as? String
                 ?? event.toolInput?["subagent_type"] as? String
@@ -438,6 +437,7 @@ final class ClaudeWatcher: ObservableObject {
             let desc = event.raw["description"] as? String
                 ?? event.toolInput?["description"] as? String
                 ?? pendingAgentDesc[sid]
+            CNLog.sub("START: id=\(subId) type=\(agentType) desc=\(desc ?? "-") session=\(sid)")
             pendingAgentType.removeValue(forKey: sid)
             pendingAgentDesc.removeValue(forKey: sid)
             let sub = Subagent(
@@ -454,6 +454,7 @@ final class ClaudeWatcher: ObservableObject {
 
         case "SubagentStop":
             let subId = event.raw["subagent_id"] as? String ?? ""
+            CNLog.sub("STOP: id=\(subId) session=\(sid)")
             if var subs = sessionSubagents[sid] {
                 if let idx = subs.firstIndex(where: { $0.id == subId }) {
                     subs[idx].status = .done
@@ -519,14 +520,14 @@ final class ClaudeWatcher: ObservableObject {
                     }
                     return TodoItem(id: content, content: content, status: status)
                 }
-                if !todos.isEmpty { sessionTodos[sid] = todos }
+                if !todos.isEmpty {
+                    CNLog.task("TodoWrite: \(todos.count) items session=\(sid)")
+                    sessionTodos[sid] = todos
+                }
             }
 
-            // TaskCreate/TaskUpdate: invalidate the task cache so the next
-            // refresh picks up the change from the jsonl (full-file scan).
-            // We don't track these via hooks because the numeric IDs assigned
-            // by Claude Code aren't available in the hook payload.
             if name == "TaskCreate" || name == "TaskUpdate" {
+                CNLog.task("\(name) session=\(sid)")
                 // Find the session URL to invalidate its task cache.
                 if let url = baseSessions.values.first(where: { $0.sessionID == sid })?.id {
                     taskCache.removeValue(forKey: url)
@@ -544,12 +545,14 @@ final class ClaudeWatcher: ObservableObject {
         // so the diff preview is available even if PreToolUse was missed.
         if event.hookEventName == "PermissionRequest", let name = event.toolName {
             let desc = event.toolInput?["description"] as? String
+            let hasAlways = !event.permissionSuggestions.isEmpty
+            CNLog.perm("PermissionRequest: tool=\(name) hasAlwaysAllow=\(hasAlways) session=\(sid)")
             currentTools[sid] = CurrentTool(
                 name: name,
                 detail: Self.describeToolInput(toolName: name, input: event.toolInput),
                 description: desc,
                 diffPreview: Self.extractDiffPreview(toolName: name, input: event.toolInput),
-                hasAlwaysAllow: !event.permissionSuggestions.isEmpty
+                hasAlwaysAllow: hasAlways
             )
         }
 
@@ -558,17 +561,20 @@ final class ClaudeWatcher: ObservableObject {
         // Stop (completion): suppress only when THIS session's terminal
         // tab is active (user already sees the output).
         if event.hookEventName == "PermissionRequest" {
+            CNLog.ui("auto-expand: PermissionRequest session=\(sid)")
             autoExpandFocusedSession = sid
             autoExpandCounter += 1
         } else if event.hookEventName == "Stop" {
-            // Check if the user is looking at THIS session's terminal.
             let sessionCwd = baseSessions.values.first(where: { $0.sessionID == sid })?.cwd
             let isThisSessionFocused = focusMonitor?.isTerminalFocused == true
                 && sessionCwd != nil
                 && SessionLauncher.isSessionTerminalActive(cwd: sessionCwd!)
             if !isThisSessionFocused {
+                CNLog.ui("auto-expand: Stop session=\(sid) (terminal not focused)")
                 autoExpandFocusedSession = sid
                 autoExpandCounter += 1
+            } else {
+                CNLog.ui("suppressed: Stop session=\(sid) (terminal focused)")
             }
         }
 
@@ -579,6 +585,10 @@ final class ClaudeWatcher: ObservableObject {
 
         let previousStatus = hookStatus[sid]?.status
         hookStatus[sid] = (newStatus, Date())
+
+        if previousStatus != newStatus {
+            CNLog.state("\(previousStatus?.rawValue ?? "nil") → \(newStatus.rawValue) session=\(sid)")
+        }
 
         // Fire user notifications on the meaningful transitions.
         if previousStatus != newStatus {
@@ -598,7 +608,7 @@ final class ClaudeWatcher: ObservableObject {
     /// Turn a tool_input payload into a short human string. Falls back
     /// to nil for tools we don't specifically recognise — the UI will
     /// just show the bare tool name in that case.
-    private static func describeToolInput(toolName: String, input: [String: Any]?) -> String? {
+    static func describeToolInput(toolName: String, input: [String: Any]?) -> String? {
         guard let input else { return nil }
         let raw: String?
         switch toolName {
