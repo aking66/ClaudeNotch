@@ -1008,6 +1008,13 @@ struct NotchView: View {
         Button {
             guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
             appDelegate.resolvePermission(sessionId: sessionId, decision: decision)
+            // Collapse the panel immediately after answering — don't wait
+            // for PostToolUse which can take seconds.
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                isExpanded = false
+                autoExpanded = false
+                focusedSessionId = nil
+            }
         } label: {
             Text(label)
                 .font(.system(size: 10, weight: .semibold))
