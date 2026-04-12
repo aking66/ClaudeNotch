@@ -34,7 +34,8 @@ struct NotchView: View {
     private let maxExpandedContentHeight: CGFloat = 400
 
     private var currentWidth: CGFloat { isExpanded ? expandedWidth : collapsedWidth }
-    private var inverseCornerRadius: CGFloat { isExpanded ? 18 : 10 }
+    private var topCornerR: CGFloat { isExpanded ? 14 : 8 }
+    private var bottomCornerR: CGFloat { isExpanded ? 26 : 18 }
 
     // MARK: - Body
 
@@ -51,24 +52,7 @@ struct NotchView: View {
             .frame(width: currentWidth)
             .frame(maxHeight: isExpanded ? maxExpandedContentHeight + notchInset : collapsedContentHeight + notchInset)
             .fixedSize(horizontal: false, vertical: true)
-            .overlay(alignment: .top) {
-                HStack {
-                    InverseCorner(radius: inverseCornerRadius)
-                        .fill(Color.black)
-                        .frame(width: inverseCornerRadius, height: inverseCornerRadius)
-                        .shadow(color: .black.opacity(0.3), radius: isExpanded ? 8 : 2, y: 2)
-                        .offset(x: -inverseCornerRadius, y: 0)
-                    Spacer()
-                    InverseCorner(radius: inverseCornerRadius)
-                        .fill(Color.black)
-                        .frame(width: inverseCornerRadius, height: inverseCornerRadius)
-                        .shadow(color: .black.opacity(0.3), radius: isExpanded ? 8 : 2, y: 2)
-                        .scaleEffect(x: -1)
-                        .offset(x: inverseCornerRadius, y: 0)
-                }
-                .opacity(isExpanded ? 1 : 0.6)
-            }
-            .contentShape(shape)
+            .contentShape(notchShape)
             .onHover { hovering in
                 if hovering && Date() < hoverCooldownUntil { return }
                 // A pending permission keeps the panel pinned open —
@@ -1060,20 +1044,14 @@ struct NotchView: View {
             )
     }
 
-    // MARK: - Background shape
+    // MARK: - Background shape (unified NotchShape)
 
-    private var shape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: isExpanded ? 26 : 18,
-            bottomTrailingRadius: isExpanded ? 26 : 18,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+    private var notchShape: NotchShape {
+        NotchShape(topCornerRadius: topCornerR, bottomCornerRadius: bottomCornerR)
     }
 
     private var background: some View {
-        shape
+        notchShape
             .fill(Color.black)
             .shadow(color: .black.opacity(0.3), radius: isExpanded ? 12 : 4, y: 3)
     }
@@ -1190,41 +1168,64 @@ struct PixelAvatar: View {
 
 // MARK: - InverseCorner
 
-/// Draws a concave (inverse) quarter-circle used at the top edges of the
-/// expanded panel to create a smooth connection with the notch cutout.
-/// Inverse (concave) quarter-circle corner for the LEFT side of a
-/// notch-extending panel. Fills the "ear" between the panel's top-left
-/// edge and a concave arc that curves downward, creating the smooth
-/// visual connection between the notch cutout and the panel body.
+/// Unified notch panel shape using quadratic Bezier curves.
+/// Concave (inverse) corners at top connect to the notch cutout;
+/// convex corners at bottom round off the panel body. Both radii
+/// are animatable so SwiftUI interpolates the morph each frame.
 ///
-/// Layout (left ear, before offset):
+/// Layout:
 /// ```
-/// (0,0)━━━━(r,0)   ← top edge (behind notch)
-///    ╲          │
-///      ╲        │   ← panel left edge
-///        ╲      │
-///          ╲    │
-///            ╲  │
-///             (r,r)  ← curve meets panel side
+/// (minX,minY)━━━━━━━━━━━━━━━━━━(maxX,minY)   ← top edge (behind notch)
+///    ╲                                ╱        ← concave quad curves (topR)
+///     │                              │
+///     │          panel body          │
+///     │                              │
+///      ╲__________________________╱            ← convex quad curves (botR)
 /// ```
-/// The concave arc faces toward (r,0) = the panel's top corner.
-/// Mirror with scaleEffect(x: -1) for the right ear.
-struct InverseCorner: Shape {
-    let radius: CGFloat
+struct NotchShape: Shape {
+    var topCornerRadius: CGFloat
+    var bottomCornerRadius: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { .init(topCornerRadius, bottomCornerRadius) }
+        set { topCornerRadius = newValue.first; bottomCornerRadius = newValue.second }
+    }
+
     func path(in rect: CGRect) -> Path {
-        let r = min(radius, min(rect.width, rect.height))
+        let topR = min(topCornerRadius, rect.width / 4)
+        let botR = min(bottomCornerRadius, rect.width / 4)
         var p = Path()
-        // Top-left corner (extends outward from panel)
-        p.move(to: CGPoint(x: 0, y: 0))
-        // Top-right (panel's top-left edge)
-        p.addLine(to: CGPoint(x: r, y: 0))
-        // Down along panel's left edge
-        p.addLine(to: CGPoint(x: r, y: r))
-        // Concave arc from (r,r) curving outward back to (0,0).
-        // Center at (r,0) so the concavity faces the panel.
-        p.addArc(center: CGPoint(x: r, y: 0), radius: r,
-                 startAngle: .degrees(90), endAngle: .degrees(180),
-                 clockwise: false)
+
+        // Top-left: concave curve from top edge inward
+        p.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        p.addQuadCurve(
+            to: CGPoint(x: rect.minX + topR, y: rect.minY + topR),
+            control: CGPoint(x: rect.minX + topR, y: rect.minY))
+
+        // Left edge down
+        p.addLine(to: CGPoint(x: rect.minX + topR, y: rect.maxY - botR))
+
+        // Bottom-left: convex corner
+        p.addQuadCurve(
+            to: CGPoint(x: rect.minX + topR + botR, y: rect.maxY),
+            control: CGPoint(x: rect.minX + topR, y: rect.maxY))
+
+        // Bottom edge
+        p.addLine(to: CGPoint(x: rect.maxX - topR - botR, y: rect.maxY))
+
+        // Bottom-right: convex corner
+        p.addQuadCurve(
+            to: CGPoint(x: rect.maxX - topR, y: rect.maxY - botR),
+            control: CGPoint(x: rect.maxX - topR, y: rect.maxY))
+
+        // Right edge up
+        p.addLine(to: CGPoint(x: rect.maxX - topR, y: rect.minY + topR))
+
+        // Top-right: concave curve back to top edge
+        p.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY),
+            control: CGPoint(x: rect.maxX - topR, y: rect.minY))
+
         p.closeSubpath()
         return p
     }
