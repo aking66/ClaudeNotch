@@ -76,6 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server.start()
         self.hookServer = server
 
+        // Safety net: if permission resolve fails (bridge gone), clear
+        // the stale awaitingApproval status after 10s timeout.
+        server.staleApprovalCallback = { [weak watcher] sessionId in
+            watcher?.clearStalePermission(sessionId: sessionId)
+        }
+
         // Idempotently install the hooks into ~/.claude/settings.json. Makes
         // a timestamped backup whenever it actually has to mutate the file.
         do {

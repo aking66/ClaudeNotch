@@ -181,15 +181,40 @@ final class HookServer {
                 ] as [String: Any]
             ]
         }
+        var sendOk = false
         if let data = try? JSONSerialization.data(withJSONObject: response) {
             data.withUnsafeBytes { buf in
                 guard let base = buf.baseAddress else { return }
-                _ = send(clientFd, base, buf.count, 0)
+                let n = send(clientFd, base, buf.count, 0)
+                sendOk = n == buf.count
             }
         }
         close(clientFd)
-        CNLog.perm("resolved via UI: \(CNLog.sessionLabel(sessionId)) → \(decision)")
+        if sendOk {
+            CNLog.perm("resolved via UI: \(CNLog.sessionLabel(sessionId)) → \(decision)")
+        } else {
+            CNLog.perm("SEND FAILED via UI: \(CNLog.sessionLabel(sessionId)) → \(decision) (bridge gone?)")
+        }
+
+        // Safety net: if PostToolUse doesn't arrive within 10s, the bridge
+        // was already gone and the status is stuck. Clear it so the UI
+        // doesn't show a stale permission card forever.
+        let sid = sessionId
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            self?.clearStaleAwaitingApproval(sessionId: sid)
+        }
     }
+
+    /// If a session is still awaitingApproval 10s after we resolved it,
+    /// the bridge never relayed our answer. Force-clear the status.
+    private func clearStaleAwaitingApproval(sessionId: String) {
+        // Only act if the handler (AppDelegate) exposes the watcher.
+        // We notify via a callback so HookServer stays decoupled.
+        staleApprovalCallback?(sessionId)
+    }
+
+    /// Set by AppDelegate to clear stale awaitingApproval from the watcher.
+    var staleApprovalCallback: ((String) -> Void)?
 
     /// Called from AppDelegate when PostToolUse arrives. If there's still
     /// a pending fd that wasn't resolved via UI, the user answered from

@@ -34,6 +34,7 @@ struct NotchView: View {
     private let maxExpandedContentHeight: CGFloat = 400
 
     private var currentWidth: CGFloat { isExpanded ? expandedWidth : collapsedWidth }
+    private var inverseCornerRadius: CGFloat { isExpanded ? 18 : 10 }
 
     // MARK: - Body
 
@@ -51,37 +52,44 @@ struct NotchView: View {
             .frame(maxHeight: isExpanded ? maxExpandedContentHeight + notchInset : collapsedContentHeight + notchInset)
             .fixedSize(horizontal: false, vertical: true)
             .overlay(alignment: .top) {
-                if isExpanded {
-                    HStack {
-                        InverseCorner(radius: 16)
-                            .fill(Color.black)
-                            .frame(width: 16, height: 16)
-                            .offset(x: -16, y: 0)
-                        Spacer()
-                        InverseCorner(radius: 16)
-                            .fill(Color.black)
-                            .frame(width: 16, height: 16)
-                            .scaleEffect(x: -1)
-                            .offset(x: 16, y: 0)
-                    }
-                    .transition(.opacity)
+                HStack {
+                    InverseCorner(radius: inverseCornerRadius)
+                        .fill(Color.black)
+                        .frame(width: inverseCornerRadius, height: inverseCornerRadius)
+                        .shadow(color: .black.opacity(0.3), radius: isExpanded ? 8 : 2, y: 2)
+                        .offset(x: -inverseCornerRadius, y: 0)
+                    Spacer()
+                    InverseCorner(radius: inverseCornerRadius)
+                        .fill(Color.black)
+                        .frame(width: inverseCornerRadius, height: inverseCornerRadius)
+                        .shadow(color: .black.opacity(0.3), radius: isExpanded ? 8 : 2, y: 2)
+                        .scaleEffect(x: -1)
+                        .offset(x: inverseCornerRadius, y: 0)
                 }
+                .opacity(isExpanded ? 1 : 0.6)
             }
             .contentShape(shape)
             .onHover { hovering in
                 if hovering && Date() < hoverCooldownUntil { return }
+                // A pending permission keeps the panel pinned open —
+                // hovering in/out must not collapse it.
+                let hasPermission = watcher.sessions.contains { $0.status == .awaitingApproval }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                     if hovering {
-                        CNLog.ui("hover expand")
+                        if !isExpanded { CNLog.ui("hover expand") }
                         isExpanded = true
-                    } else if !autoExpanded {
-                        CNLog.ui("hover collapse")
+                    } else if !autoExpanded && !hasPermission {
+                        if isExpanded { CNLog.ui("hover collapse") }
                         isExpanded = false
                         hoverCooldownUntil = Date().addingTimeInterval(0.5)
                     }
                 }
                 if hovering {
-                    autoExpanded = false
+                    // Don't clear autoExpanded while a permission is pending —
+                    // the panel must stay pinned until the user responds.
+                    if !hasPermission {
+                        autoExpanded = false
+                    }
                     usage.refreshIfStale(maxAge: 20)
                 } else {
                     focusedSessionId = nil
@@ -118,7 +126,8 @@ struct NotchView: View {
             // Collapse when user switches app — but only for manual hovers,
             // not for auto-expanded popups (those use their own timer).
             .onChange(of: focusMonitor.appSwitchCounter) { _ in
-                if isExpanded && !autoExpanded {
+                let hasPermission = watcher.sessions.contains { $0.status == .awaitingApproval }
+                if isExpanded && !autoExpanded && !hasPermission {
                     CNLog.ui("app-switch collapse")
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                         isExpanded = false
@@ -449,8 +458,10 @@ struct NotchView: View {
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(bgColor))
         .contentShape(Rectangle())
         .onTapGesture {
+            // Don't JUMP while a permission is pending — the user needs
+            // the panel open to click the approval buttons.
+            if session.status == .awaitingApproval { return }
             SessionLauncher.open(session)
-            // Collapse panel after jumping to terminal
             withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
                 isExpanded = false
                 autoExpanded = false

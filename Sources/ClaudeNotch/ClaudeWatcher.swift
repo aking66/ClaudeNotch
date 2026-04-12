@@ -249,6 +249,16 @@ final class ClaudeWatcher: ObservableObject {
         hookAliveSessions[sessionID] != nil
     }
 
+    /// Force-clear a stuck awaitingApproval status. Called when the
+    /// permission resolve send() failed (bridge gone) and no PostToolUse
+    /// arrived within the timeout window.
+    func clearStalePermission(sessionId: String) {
+        guard hookStatus[sessionId]?.status == .awaitingApproval else { return }
+        CNLog.perm("clearing stale awaitingApproval (no PostToolUse after resolve) session=\(CNLog.sessionLabel(sessionId))")
+        hookStatus[sessionId] = (.idle, Date())
+        rebuildPublishedSessions()
+    }
+
     private func refresh() {
         let fm = FileManager.default
         let projectsDir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
