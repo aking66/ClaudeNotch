@@ -190,6 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// back to the Claude Code CLI through the bridge socket.
     func resolvePermission(sessionId: String, decision: String) {
         hookServer?.resolvePermission(sessionId: sessionId, decision: decision)
+        // Immediately switch status to working so the UI stops showing
+        // the permission card and hasPermission becomes false (allowing
+        // the panel to collapse). Don't wait for PostToolUse.
+        watcher?.permissionResolved(sessionId: sessionId)
     }
 
     @objc private func uninstallHooksAction() {

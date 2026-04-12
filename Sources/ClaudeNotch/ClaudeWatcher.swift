@@ -259,6 +259,15 @@ final class ClaudeWatcher: ObservableObject {
         rebuildPublishedSessions()
     }
 
+    /// Immediately transition from awaitingApproval → working after the
+    /// user clicks Allow/Deny in the UI. This makes the permission card
+    /// disappear instantly instead of waiting for PostToolUse.
+    func permissionResolved(sessionId: String) {
+        guard hookStatus[sessionId]?.status == .awaitingApproval else { return }
+        hookStatus[sessionId] = (.working, Date())
+        rebuildPublishedSessions()
+    }
+
     private func refresh() {
         let fm = FileManager.default
         let projectsDir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
