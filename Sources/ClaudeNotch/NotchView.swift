@@ -128,6 +128,9 @@ struct NotchView: View {
             alignment: .top
         )
         .onReceive(clock) { _ in tick &+= 1 }
+        .onChange(of: isExpanded) { expanded in
+            if !expanded { showSettings = false }
+        }
     }
 
     // MARK: - Content
