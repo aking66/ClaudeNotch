@@ -47,6 +47,38 @@ struct SettingsView: View {
                                        icon: "text.bubble.fill")
                     }
 
+                    // Auto-Approve section
+                    settingsSection("Auto-Approve") {
+                        settingsToggle("Copilot mode (approve all)", isOn: $settings.copilotEnabled,
+                                       icon: "bolt.shield.fill")
+                        if !settings.copilotEnabled {
+                            Text("Per-tool auto-approve:")
+                                .font(.system(size: 9))
+                                .foregroundColor(.white.opacity(0.3))
+                                .padding(.leading, 22)
+                            ForEach(["Read", "Grep", "Glob", "Edit", "Write", "Bash", "Agent", "WebSearch", "WebFetch"], id: \.self) { tool in
+                                toolToggle(tool)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.right.circle")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.4))
+                                .frame(width: 14)
+                            Text("Decision")
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.7))
+                            Spacer()
+                            Picker("", selection: $settings.autoApproveDecision) {
+                                Text("Allow Once").tag("allow")
+                                Text("Always Allow").tag("always_allow")
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 160)
+                            .scaleEffect(0.8)
+                        }
+                    }
+
                     // Behavior section
                     settingsSection("Behavior") {
                         settingsToggle("Auto-expand on permission", isOn: $settings.autoExpandOnPermission,
@@ -120,5 +152,16 @@ struct SettingsView: View {
                 .scaleEffect(0.65)
                 .frame(width: 36)
         }
+    }
+
+    private func toolToggle(_ tool: String) -> some View {
+        let isOn = Binding<Bool>(
+            get: { settings.autoApproveTools.contains(tool) },
+            set: { enabled in
+                if enabled { settings.autoApproveTools.insert(tool) }
+                else { settings.autoApproveTools.remove(tool) }
+            }
+        )
+        return settingsToggle(tool, isOn: isOn, indent: true)
     }
 }

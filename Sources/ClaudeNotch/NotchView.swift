@@ -271,6 +271,18 @@ struct NotchView: View {
 
             Spacer(minLength: 8)
 
+            // Copilot toggle — only visible when enabled in settings.
+            if settings.copilotEnabled || !settings.autoApproveTools.isEmpty {
+                Button {
+                    settings.copilotEnabled.toggle()
+                } label: {
+                    Image(systemName: settings.copilotEnabled ? "bolt.shield.fill" : "bolt.shield")
+                        .font(.system(size: 12))
+                        .foregroundColor(settings.copilotEnabled ? .green : .white.opacity(0.35))
+                }
+                .buttonStyle(.plain)
+            }
+
             Button {
                 settings.soundEnabled.toggle()
             } label: {

@@ -39,6 +39,9 @@ final class HookServer {
     /// When each pending approval was stored, for timeout-based cleanup.
     private var pendingApprovalTimes: [String: Date] = [:]
 
+    /// Sessions with per-session copilot enabled (auto-approve all tools).
+    var copilotSessions: Set<String> = []
+
     /// Counter per session, incremented on each new PermissionRequest.
     /// Used to ensure the 10s fallback timer doesn't clear a NEWER permission.
     private var permissionGeneration: [String: Int] = [:]
@@ -265,6 +268,39 @@ final class HookServer {
         }
     }
 
+    /// Write a decision directly to a bridge fd and close it.
+    /// Used by auto-approve to respond immediately without storing
+    /// the fd in pendingApprovals.
+    private func resolvePermissionOnFd(_ fd: Int32, decision: String) {
+        let response: [String: Any]
+        if decision == "bypass" {
+            response = ["decision": "approve"]
+        } else {
+            let decisionObj: [String: Any]
+            switch decision {
+            case "deny":
+                decisionObj = ["behavior": "deny", "message": "Denied via ClaudeNotch"]
+            case "always_allow":
+                decisionObj = ["behavior": "allow", "remember": true]
+            default:
+                decisionObj = ["behavior": "allow"]
+            }
+            response = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PermissionRequest",
+                    "decision": decisionObj
+                ] as [String: Any]
+            ]
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: response) {
+            data.withUnsafeBytes { buf in
+                guard let base = buf.baseAddress else { return }
+                _ = send(fd, base, buf.count, 0)
+            }
+        }
+        close(fd)
+    }
+
     /// If a session is still awaitingApproval 10s after we resolved it,
     /// the bridge never relayed our answer. Force-clear the status.
     private func clearStaleAwaitingApproval(sessionId: String) {
@@ -341,6 +377,20 @@ final class HookServer {
                 }
 
                 if isPermission, let sid = event.sessionId {
+                    let toolName = event.toolName ?? ""
+                    let settings = AppSettings.shared
+                    let isCopilotSession = self.copilotSessions.contains(sid)
+
+                    // Auto-approve: copilot mode, per-session copilot, or per-tool rule.
+                    if settings.copilotEnabled || isCopilotSession || settings.autoApproveTools.contains(toolName) {
+                        let decision = settings.autoApproveDecision
+                        CNLog.perm("auto-approved: tool=\(toolName) decision=\(decision) session=\(CNLog.sessionLabel(sid)) (copilot=\(settings.copilotEnabled) session=\(isCopilotSession) tool-rule=\(settings.autoApproveTools.contains(toolName)))")
+                        // Write decision directly to the bridge fd.
+                        self.resolvePermissionOnFd(clientFd, decision: decision)
+                        self.handler(event)
+                        return
+                    }
+
                     if let old = self.pendingApprovals[sid] {
                         CNLog.perm("replacing stale pending fd for \(CNLog.sessionLabel(sid))")
                         close(old)
@@ -351,7 +401,7 @@ final class HookServer {
                     self.hadPendingApproval.insert(sid)
                     self.pendingApprovalTimes[sid] = Date()
                     self.permissionGeneration[sid, default: 0] += 1
-                    CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(event.toolName ?? "-")")
+                    CNLog.perm("stored pending fd=\(clientFd) for \(CNLog.sessionLabel(sid)) tool=\(toolName)")
                 }
 
                 self.handler(event)

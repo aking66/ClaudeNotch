@@ -64,6 +64,23 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(autoCollapseDelay, forKey: "autoCollapseDelay") }
     }
 
+    // MARK: - Copilot / Auto-Approve
+
+    /// Global copilot: auto-approve ALL tools for ALL sessions.
+    @Published var copilotEnabled: Bool {
+        didSet { defaults.set(copilotEnabled, forKey: "copilotEnabled") }
+    }
+
+    /// Per-tool auto-approve (when copilot is off). Stored as comma-separated.
+    @Published var autoApproveTools: Set<String> {
+        didSet { defaults.set(Array(autoApproveTools), forKey: "autoApproveTools") }
+    }
+
+    /// What decision to send: "allow" (once) or "always_allow" (remembered).
+    @Published var autoApproveDecision: String {
+        didSet { defaults.set(autoApproveDecision, forKey: "autoApproveDecision") }
+    }
+
     // MARK: - Init
 
     private init() {
@@ -81,6 +98,9 @@ final class AppSettings: ObservableObject {
             "autoExpandOnCompletion": true,
             "suppressWhenTerminalFocused": true,
             "autoCollapseDelay": 10.0,
+            "copilotEnabled": false,
+            "autoApproveTools": [String](),
+            "autoApproveDecision": "allow",
         ])
 
         soundEnabled = defaults.bool(forKey: "soundEnabled")
@@ -95,6 +115,9 @@ final class AppSettings: ObservableObject {
         autoExpandOnCompletion = defaults.bool(forKey: "autoExpandOnCompletion")
         suppressWhenTerminalFocused = defaults.bool(forKey: "suppressWhenTerminalFocused")
         autoCollapseDelay = defaults.double(forKey: "autoCollapseDelay")
+        copilotEnabled = defaults.bool(forKey: "copilotEnabled")
+        autoApproveTools = Set(defaults.stringArray(forKey: "autoApproveTools") ?? [])
+        autoApproveDecision = defaults.string(forKey: "autoApproveDecision") ?? "allow"
 
         syncSound()
     }
