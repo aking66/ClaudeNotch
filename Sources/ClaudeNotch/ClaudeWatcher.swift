@@ -608,13 +608,16 @@ final class ClaudeWatcher: ObservableObject {
         // PermissionRequest: ALWAYS expand (user must respond).
         // Stop (completion): suppress only when THIS session's terminal
         // tab is active (user already sees the output).
-        if event.hookEventName == "PermissionRequest" {
+        let s = AppSettings.shared
+        if event.hookEventName == "PermissionRequest" && s.autoExpandOnPermission {
             CNLog.ui("auto-expand: PermissionRequest session=\(CNLog.sessionLabel(sid))")
             autoExpandFocusedSession = sid
             autoExpandCounter += 1
-        } else if event.hookEventName == "Stop" {
+        } else if event.hookEventName == "Stop" && s.autoExpandOnCompletion {
             let sessionCwd = baseSessions.values.first(where: { $0.sessionID == sid })?.cwd
-            let isThisSessionFocused = focusMonitor?.isTerminalFocused == true
+            let suppressTerminal = s.suppressWhenTerminalFocused
+            let isThisSessionFocused = suppressTerminal
+                && focusMonitor?.isTerminalFocused == true
                 && sessionCwd != nil
                 && SessionLauncher.isSessionTerminalActive(cwd: sessionCwd!)
             let currentApp = focusMonitor?.currentAppName ?? "?"

@@ -36,12 +36,12 @@ final class SoundManager {
     func playForEvent(_ hookEventName: String, toolName: String? = nil) {
         guard enabled else { return }
 
+        let s = AppSettings.shared
         switch hookEventName {
         case "SessionStart":
-            play(.sessionStart)
+            if s.soundOnStart { play(.sessionStart) }
 
         case "UserPromptSubmit":
-            // Spam detection: 3+ prompts in 10 seconds
             let now = Date()
             recentPrompts.append(now)
             recentPrompts = recentPrompts.filter { now.timeIntervalSince($0) < spamWindow }
@@ -53,10 +53,10 @@ final class SoundManager {
             }
 
         case "Stop":
-            play(.taskComplete)
+            if s.soundOnCompletion { play(.taskComplete) }
 
         case "PermissionRequest":
-            play(.inputRequired)
+            if s.soundOnPermission { play(.inputRequired) }
 
         case "PreCompact":
             play(.resourceLimit)

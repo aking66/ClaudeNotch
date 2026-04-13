@@ -16,6 +16,8 @@ struct NotchView: View {
     @State private var focusedSessionId: String?
     @State private var hiddenSessionIDs: Set<String> = []
     @State private var hoverCooldownUntil: Date = .distantPast
+    @State private var showSettings = false
+    @ObservedObject private var settings = AppSettings.shared
 
     /// Rows visible before the user taps "Show all N sessions".
     private let defaultRowLimit = 8
@@ -179,48 +181,52 @@ struct NotchView: View {
     private var expandedContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if watcher.sessions.isEmpty {
-                        Text("> no active sessions")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.4))
-                            .padding(.top, 4)
-                    } else if let fid = focusedSessionId,
-                              let focused = watcher.sessions.first(where: { $0.sessionID == fid }) {
-                        // Focus mode: show only the triggered session.
-                        sessionRow(focused)
-                        if watcher.sessions.count > 1 {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    focusedSessionId = nil
-                                    autoExpanded = false
+            if showSettings {
+                SettingsView { withAnimation(.easeInOut(duration: 0.2)) { showSettings = false } }
+                    .transition(.opacity)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if watcher.sessions.isEmpty {
+                            Text("> no active sessions")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.4))
+                                .padding(.top, 4)
+                        } else if let fid = focusedSessionId,
+                                  let focused = watcher.sessions.first(where: { $0.sessionID == fid }) {
+                            sessionRow(focused)
+                            if watcher.sessions.count > 1 {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        focusedSessionId = nil
+                                        autoExpanded = false
+                                    }
+                                } label: {
+                                    Text("Show all \(watcher.sessions.count) sessions")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.45))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.top, 4)
                                 }
-                            } label: {
-                                Text("Show all \(watcher.sessions.count) sessions")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.45))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 4)
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
-                        }
-                    } else {
-                        // Normal mode: show all sessions (minus hidden).
-                        let filtered = watcher.sessions.filter { !hiddenSessionIDs.contains($0.sessionID) }
-                        let visible = showAllSessions
-                            ? Array(filtered)
-                            : Array(filtered.prefix(defaultRowLimit))
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(visible) { session in
-                                sessionRow(session)
+                        } else {
+                            let filtered = watcher.sessions.filter { !hiddenSessionIDs.contains($0.sessionID) }
+                            let visible = showAllSessions
+                                ? Array(filtered)
+                                : Array(filtered.prefix(defaultRowLimit))
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(visible) { session in
+                                    sessionRow(session)
+                                }
                             }
-                        }
-                        if filtered.count > defaultRowLimit && !showAllSessions {
-                            showAllButton
+                            if filtered.count > defaultRowLimit && !showAllSessions {
+                                showAllButton
+                            }
                         }
                     }
                 }
+                .transition(.opacity)
             }
             Spacer(minLength: 0)
         }
@@ -265,16 +271,25 @@ struct NotchView: View {
 
             Spacer(minLength: 8)
 
-            // Volume / sound indicator (placeholder — reserved for future mute
-            // of "Working..." beeps or notifications).
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 12))
-                .foregroundColor(.white.opacity(0.55))
+            Button {
+                settings.soundEnabled.toggle()
+            } label: {
+                Image(systemName: settings.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(settings.soundEnabled ? .white.opacity(0.55) : .orange.opacity(0.7))
+            }
+            .buttonStyle(.plain)
 
-            // Settings cog — opens the menu bar item's menu in future iterations.
-            Image(systemName: "gearshape.fill")
-                .font(.system(size: 12))
-                .foregroundColor(.white.opacity(0.55))
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showSettings.toggle()
+                }
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(showSettings ? .cyan : .white.opacity(0.55))
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -514,21 +529,22 @@ struct NotchView: View {
             }
         }
 
-        // Hide tool badge when permission card is showing (avoids duplication)
-        if session.status != .awaitingApproval, let tool = session.currentTool {
+        if settings.showToolBadge, session.status != .awaitingApproval, let tool = session.currentTool {
             toolBadge(tool)
         }
 
-        // Tasks before subagents (matching Vibe Island layout)
-        let activeTodos = session.todos.filter { $0.status != .completed }
-        if !activeTodos.isEmpty {
-            tasksList(session.todos)
+        if settings.showTasks {
+            let activeTodos = session.todos.filter { $0.status != .completed }
+            if !activeTodos.isEmpty {
+                tasksList(session.todos)
+            }
         }
 
-        // Show only running subagents + last completed one (not all history)
-        let visibleSubs = Self.filterSubagents(session.subagents)
-        if !visibleSubs.isEmpty {
-            subagentTree(visibleSubs)
+        if settings.showSubagents {
+            let visibleSubs = Self.filterSubagents(session.subagents)
+            if !visibleSubs.isEmpty {
+                subagentTree(visibleSubs)
+            }
         }
     }
 
@@ -759,7 +775,9 @@ struct NotchView: View {
                     .foregroundColor(.orange.opacity(0.9))
             }
         case .idle:
-            conversationCard(for: session)
+            if settings.showConversationCard {
+                conversationCard(for: session)
+            }
         }
     }
 
