@@ -442,8 +442,7 @@ final class ClaudeWatcher: ObservableObject {
         } else if event.hookEventName == "SessionEnd" {
             hookAliveSessions.removeValue(forKey: sid)
             CNLog.session("alive -\(CNLog.sessionLabel(sid)) via SessionEnd")
-        }
-        if hookAliveSessions[sid] == nil, let path = event.transcriptPath {
+        } else if hookAliveSessions[sid] == nil, let path = event.transcriptPath {
             hookAliveSessions[sid] = path
             CNLog.session("alive +\(CNLog.sessionLabel(sid)) via \(event.hookEventName)")
         }
@@ -728,6 +727,17 @@ final class ClaudeWatcher: ObservableObject {
 
     /// Map a hook event name to the session status it implies.
     /// Events we don't care about return nil (no update).
+    /// Lower number = shown higher in the list. Permission prompts always
+    /// win because they block the user; busy states beat idle.
+    private static func sortPriority(_ status: SessionStatus) -> Int {
+        switch status {
+        case .awaitingApproval: return 0
+        case .working, .compacting: return 1
+        case .interrupted: return 2
+        case .idle: return 3
+        }
+    }
+
     private static func statusFromHookEvent(_ name: String) -> SessionStatus? {
         switch name {
         case "UserPromptSubmit", "PreToolUse":
@@ -791,7 +801,14 @@ final class ClaudeWatcher: ObservableObject {
             }
             return result
         }
-        sessions = merged.sorted { $0.lastModified > $1.lastModified }
+        sessions = merged.sorted { lhs, rhs in
+            // Priority: awaitingApproval > other busy states > idle.
+            // Within the same priority bucket, newer activity wins.
+            let lp = Self.sortPriority(lhs.status)
+            let rp = Self.sortPriority(rhs.status)
+            if lp != rp { return lp < rp }
+            return lhs.lastModified > rhs.lastModified
+        }
 
         // Log terminal summary when it changes.
         if let server = (NSApp.delegate as? AppDelegate)?.hookServer {

@@ -97,7 +97,8 @@ struct NotchView: View {
                 let isPermission = session?.status == .awaitingApproval
                 if !isPermission {
                     let counter = watcher.autoExpandCounter
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                    let delay = AppSettings.shared.autoCollapseDelay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         if autoExpanded && watcher.autoExpandCounter == counter {
                             CNLog.ui("auto-expand timer collapse")
                             withAnimation(collapseAnimation) {

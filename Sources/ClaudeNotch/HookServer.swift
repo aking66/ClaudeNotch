@@ -319,11 +319,16 @@ final class HookServer {
             hadPendingApproval.remove(sessionId)
             return
         }
-        // Only log "via Terminal" if this session actually had a pending
-        // approval that's now gone (bridge exited because user answered).
-        if hadPendingApproval.remove(sessionId) != nil && pendingApprovals[sessionId] == nil {
-            CNLog.perm("resolved via Terminal: \(CNLog.sessionLabel(sessionId))")
+        // PostToolUse after PermissionRequest without UI resolution means the
+        // user answered from the terminal. The bridge subprocess is still
+        // blocked on recv() waiting for our decision — close its fd so it
+        // unblocks and exits instead of leaking for 30s until the timeout.
+        guard hadPendingApproval.remove(sessionId) != nil else { return }
+        if let fd = pendingApprovals.removeValue(forKey: sessionId) {
+            close(fd)
+            pendingApprovalTimes.removeValue(forKey: sessionId)
         }
+        CNLog.perm("resolved via Terminal: \(CNLog.sessionLabel(sessionId))")
     }
 
     // MARK: - Accept loop (runs on background queue)
